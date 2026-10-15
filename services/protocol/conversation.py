@@ -1060,6 +1060,16 @@ def conversation_events(
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
+    if not image_model and backend.is_codex_source_account:
+        for delta in backend.stream_codex_text(
+            normalized,
+            model=model,
+            thinking_effort=thinking_effort,
+        ):
+            if delta:
+                yield {"type": "conversation.delta", "delta": delta}
+        return
+
     history_text = "" if image_model else assistant_history_text(normalized)
     history_messages = [] if image_model else assistant_history_messages(normalized)
     final_prompt = prompt_with_global_system(build_image_prompt(prompt, size, quality)) if image_model else prompt

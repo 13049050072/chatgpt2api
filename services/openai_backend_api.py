@@ -230,9 +230,10 @@ class OpenAIBackendAPI:
         self.token_claims = decode_access_token_payload(self.access_token)
         auth_claim = self.token_claims.get("https://api.openai.com/auth")
         auth_claim = auth_claim if isinstance(auth_claim, dict) else {}
-        self.chatgpt_account_id = str(
-            auth_claim.get("chatgpt_account_id") or self.account.get("account_id") or ""
-        ).strip()
+        # This header must reflect the account claim bound to the access token.
+        # Imported Codex exports can have an account_id field that is not a
+        # ChatGPT account ID, so never synthesize this header from that field.
+        self.chatgpt_account_id = str(auth_claim.get("chatgpt_account_id") or "").strip()
         self._device_identity = (
             self.chatgpt_account_id
             or str(self.account.get("management_id") or "").strip()
@@ -878,6 +879,10 @@ class OpenAIBackendAPI:
         if source_type != "codex":
             raise RuntimeError("codex responses endpoint requires a codex source account")
 
+    @property
+    def is_codex_source_account(self) -> bool:
+        return account_service._normalize_source_type(self.account.get("source_type")) == "codex"
+
     @staticmethod
     def _codex_image_input(prompt: str, images: list[str]) -> list[Dict[str, Any]]:
         content: list[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
@@ -885,6 +890,160 @@ class OpenAIBackendAPI:
             payload = image if image.startswith("data:image/") else f"data:image/png;base64,{image}"
             content.append({"type": "input_image", "image_url": payload})
         return [{"role": "user", "content": content}]
+
+    @staticmethod
+    def _codex_text_input(messages: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+        input_messages: list[Dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "user").strip().lower()
+            content = message.get("content", "")
+            if isinstance(content, str):
+                input_messages.append({"role": role, "content": content})
+                continue
+
+            parts: list[Dict[str, Any]] = []
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, str):
+                        parts.append({"type": "input_text", "text": part})
+                        continue
+                    if not isinstance(part, dict):
+                        continue
+                    part_type = str(part.get("type") or "").strip().lower()
+                    if part_type in {"text", "input_text", "output_text"}:
+                        text = part.get("text")
+                        if isinstance(text, str):
+                            parts.append({"type": "input_text", "text": text})
+                        continue
+                    if part_type != "image":
+                        continue
+                    image_data = part.get("data")
+                    mime_type = str(part.get("mime") or "image/png").strip() or "image/png"
+                    if isinstance(image_data, (bytes, bytearray)):
+                        encoded = base64.b64encode(bytes(image_data)).decode("ascii")
+                        image_url = f"data:{mime_type};base64,{encoded}"
+                    elif isinstance(image_data, str) and image_data:
+                        image_url = image_data if image_data.startswith("data:image/") else (
+                            f"data:{mime_type};base64,{image_data}"
+                        )
+                    else:
+                        continue
+                    parts.append({"type": "input_image", "image_url": image_url})
+
+            input_messages.append({"role": role, "content": parts})
+        return input_messages
+
+    def _codex_text_model(self, requested_model: str) -> str:
+        model = str(requested_model or "").strip()
+        if not model or model.lower() == "auto":
+            account_model = str(self.account.get("default_model_slug") or "").strip()
+            model = account_model if account_model and account_model.lower() != "auto" else CODEX_RESPONSES_MODEL
+        return model
+
+    @staticmethod
+    def _codex_response_output_text(value: Any) -> str:
+        if isinstance(value, dict):
+            if str(value.get("type") or "") == "output_text" and isinstance(value.get("text"), str):
+                return value["text"]
+            return "".join(OpenAIBackendAPI._codex_response_output_text(item) for item in value.values())
+        if isinstance(value, list):
+            return "".join(OpenAIBackendAPI._codex_response_output_text(item) for item in value)
+        return ""
+
+    def iter_codex_text_response_events(
+            self,
+            messages: list[Dict[str, Any]],
+            model: str = "auto",
+            thinking_effort: str = "",
+    ) -> Iterator[Dict[str, Any]]:
+        if not self.access_token:
+            raise RuntimeError("access_token is required for codex text endpoints")
+        self._ensure_codex_source_account()
+        path = "/backend-api/codex/responses"
+        payload: Dict[str, Any] = {
+            "model": self._codex_text_model(model),
+            "store": False,
+            "input": self._codex_text_input(messages),
+            "text": {"format": {"type": "text"}},
+            "tool_choice": "none",
+            "stream": True,
+        }
+        normalized_effort = normalize_thinking_effort(thinking_effort)
+        if normalized_effort:
+            payload["reasoning"] = {
+                "effort": "xhigh" if normalized_effort == "extended" else normalized_effort
+            }
+
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._codex_responses_headers(),
+            json=payload,
+            timeout=300,
+            stream=True,
+        )
+        try:
+            ensure_ok(response, path)
+            content_type = str(response.headers.get("content-type") or "").lower()
+            if "application/json" in content_type:
+                data = response.json()
+                if isinstance(data, dict):
+                    yield data
+                return
+
+            for raw_event in iter_sse_payloads(response, max_duration_secs=300):
+                if raw_event == "[DONE]":
+                    break
+                try:
+                    event = json.loads(raw_event)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(event, dict):
+                    yield event
+                    if str(event.get("type") or "") in {
+                        "response.completed",
+                        "response.failed",
+                        "response.incomplete",
+                    }:
+                        break
+        finally:
+            response.close()
+
+    def stream_codex_text(
+            self,
+            messages: list[Dict[str, Any]],
+            model: str = "auto",
+            thinking_effort: str = "",
+    ) -> Iterator[str]:
+        emitted_text = False
+        for event in self.iter_codex_text_response_events(messages, model, thinking_effort):
+            event_type = str(event.get("type") or "")
+            if event_type == "response.output_text.delta":
+                delta = event.get("delta")
+                if isinstance(delta, str) and delta:
+                    emitted_text = True
+                    yield delta
+                continue
+            if event_type == "response.output_text.done" and not emitted_text:
+                text = event.get("text")
+                if isinstance(text, str) and text:
+                    emitted_text = True
+                    yield text
+                continue
+            if event_type in {"response.failed", "error"}:
+                response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                error = event.get("error") or response.get("error")
+                message = error.get("message") if isinstance(error, dict) else error
+                raise RuntimeError(str(message or "Codex Responses request failed"))
+            if event_type in {"response.completed", "response.incomplete"} and not emitted_text:
+                response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                text = self._codex_response_output_text(response.get("output"))
+                if text:
+                    emitted_text = True
+                    yield text
+        if not emitted_text:
+            raise RuntimeError("Codex Responses returned no text output")
 
     @staticmethod
     def _codex_body_preview(body: Any, limit: int = 4000) -> str:
