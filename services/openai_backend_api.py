@@ -16,11 +16,13 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any, Dict, Iterator, Optional
 from urllib.parse import unquote, urlparse
+from uuid import NAMESPACE_URL, uuid5
 
 from curl_cffi import CurlInfo, CurlOpt, requests
 from PIL import Image
 
 from services.account_service import account_service
+from services.account_credentials import decode_access_token_payload
 from services.config import config
 from services.editable_file_failure import EditableFileFailureError
 from services.image_failure import (
@@ -225,12 +227,25 @@ class OpenAIBackendAPI:
         self.access_token = access_token
         self.account = account_service.get_account(self.access_token) if self.access_token else {}
         self.account = self.account if isinstance(self.account, dict) else {}
+        self.token_claims = decode_access_token_payload(self.access_token)
+        auth_claim = self.token_claims.get("https://api.openai.com/auth")
+        auth_claim = auth_claim if isinstance(auth_claim, dict) else {}
+        self.chatgpt_account_id = str(
+            auth_claim.get("chatgpt_account_id") or self.account.get("account_id") or ""
+        ).strip()
+        self._device_identity = (
+            self.chatgpt_account_id
+            or str(self.account.get("management_id") or "").strip()
+            or str(self.account.get("user_id") or "").strip()
+            or str(self.token_claims.get("sub") or "").strip()
+        )
         self._credential_access_token = str(self.access_token or "").strip()
         self._credential_refresh_token = str(self.account.get("refresh_token") or "").strip()
         self._credential_last_token_refresh_at = self.account.get("last_token_refresh_at")
         self.fp = self._build_fp()
         self.user_agent = self.fp["user-agent"]
         self.device_id = self.fp["oai-device-id"]
+        self.oai_did = self.fp["oai-did"]
         self.session_id = self.fp["oai-session-id"]
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
@@ -278,6 +293,7 @@ class OpenAIBackendAPI:
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
             "OAI-Device-Id": self.device_id,
+            "Oai-Did": self.oai_did,
             "OAI-Session-Id": self.session_id,
             "OAI-Language": "zh-CN",
             "OAI-Client-Version": self.client_version,
@@ -320,13 +336,28 @@ class OpenAIBackendAPI:
             value = str(account.get(key) or "").strip()
             if value:
                 fp[key] = value
+
+        explicit_oai_did = str(
+            fp.get("fp.oai-did")
+            or account.get("fp.oai-did")
+            or fp.get("oai-did")
+            or account.get("oai-did")
+            or ""
+        ).strip()
         fp.setdefault(
             "user-agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
         )
         fp.setdefault("impersonate", "chrome110")
-        fp.setdefault("oai-device-id", new_uuid())
+        # Use a stable per-account ID when possible; anonymous clients keep a random ID.
+        if not fp.get("oai-device-id"):
+            fp["oai-device-id"] = (
+                str(uuid5(NAMESPACE_URL, f"chatgpt2api:device:{self._device_identity}"))
+                if self._device_identity
+                else new_uuid()
+            )
+        fp["oai-did"] = explicit_oai_did or fp.get("oai-did") or fp["oai-device-id"]
         fp.setdefault("oai-session-id", new_uuid())
         fp.setdefault("sec-ch-ua", '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"')
         fp.setdefault("sec-ch-ua-mobile", "?0")
@@ -338,6 +369,8 @@ class OpenAIBackendAPI:
         headers = dict(self.session.headers)
         if self.access_token:
             headers["Authorization"] = f"Bearer {self.access_token}"
+        if self.chatgpt_account_id:
+            headers["ChatGPT-Account-Id"] = self.chatgpt_account_id
         headers["X-OpenAI-Target-Path"] = path
         headers["X-OpenAI-Target-Route"] = path
         if extra:
@@ -829,10 +862,15 @@ class OpenAIBackendAPI:
         return self._headers(path, headers)
 
     def _codex_responses_headers(self) -> Dict[str, str]:
-        return {
+        headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
+            "OAI-Device-Id": self.device_id,
+            "Oai-Did": self.oai_did,
         }
+        if self.chatgpt_account_id:
+            headers["ChatGPT-Account-Id"] = self.chatgpt_account_id
+        return headers
 
     def _ensure_codex_source_account(self) -> None:
         account = account_service.get_account(self.access_token)
