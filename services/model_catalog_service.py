@@ -16,12 +16,35 @@ from services.config import config
 from utils.helper import CODEX_IMAGE_MODEL, WEB_IMAGE_MODELS
 
 
+GPT_FREE_CHAT_MODEL = "gpt-5.6-luna"
+
 FALLBACK_CHAT_MODELS = [
+    "gpt-6",
     "gpt-5.6",
+    GPT_FREE_CHAT_MODEL,
     "auto",
 ]
 
 FALLBACK_IMAGE_MODELS = list(WEB_IMAGE_MODELS)
+
+
+def text_account_requirements(model: str) -> tuple[str | None, str | None]:
+    if str(model or "").strip().lower() == GPT_FREE_CHAT_MODEL:
+        return "Free", "web"
+    return None, None
+
+
+def resolve_upstream_chat_model(model: str, account: dict[str, Any]) -> str:
+    requested = str(model or "auto").strip() or "auto"
+    account_type = account_service._normalize_account_type(account.get("type"))
+    source_type = account_service._normalize_source_type(account.get("source_type"))
+    if (
+        source_type == "web"
+        and account_type == "free"
+        and requested.lower() in {"gpt-5.6", GPT_FREE_CHAT_MODEL}
+    ):
+        return "auto"
+    return requested
 
 
 def _normalize_list(raw: object) -> list[str]:
@@ -54,6 +77,12 @@ def _configured_chat_models(settings: dict[str, Any]) -> list[str]:
             if model not in combined:
                 combined.append(model)
     return combined
+
+
+def get_effective_chat_models(settings: dict[str, Any]) -> list[str]:
+    """Return the effective chat catalogue for a configuration snapshot."""
+    configured = _configured_chat_models(settings)
+    return _unique(configured or list(FALLBACK_CHAT_MODELS))
 
 
 def _configured_image_models(settings: dict[str, Any]) -> list[str]:
@@ -118,11 +147,11 @@ class ModelCatalogService:
 
     def view(self) -> ModelCatalogView:
         settings = config.get()
-        configured_chat_models = _configured_chat_models(settings)
+        effective_chat_models = get_effective_chat_models(settings)
         configured_image_models = _configured_image_models(settings)
 
-        chat_source = "config" if configured_chat_models else "fallback"
-        chat_models = _unique(configured_chat_models or list(FALLBACK_CHAT_MODELS))
+        chat_source = "config" if _configured_chat_models(settings) else "fallback"
+        chat_models = effective_chat_models
 
         if configured_image_models:
             image_source = "config"

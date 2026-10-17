@@ -29,7 +29,8 @@ requirements may move to `archive/` after links and this index are updated.
 
 ## Active requirements
 
-No active PRDs are currently tracked.
+- [`0001-model-catalog-editor.md`](0001-model-catalog-editor.md) — discover and
+  enable the shared upstream chat model catalogue.
 
 PRDs are planning evidence, never proof that the product already behaves as
 described.

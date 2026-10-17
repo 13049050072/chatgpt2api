@@ -139,7 +139,7 @@ Authorization: Bearer <auth-key>
 
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
-| `/v1/models` | `GET` | Returns the shared console model catalog; default chat models are `gpt-5.6` and `auto` |
+| `/v1/models` | `GET` | Returns the shared enabled model catalog; default chat models include `gpt-6`, `gpt-5.6`, `gpt-5.6-luna`, and `auto` |
 | `/v1/chat/completions` | `POST` | Chat Completions entry point for text, search, and image scenarios |
 | `/v1/responses` | `POST` | Responses entry point with text, search, and image tools |
 | `/v1/messages` | `POST` | Anthropic Messages-compatible entry point |
@@ -179,6 +179,10 @@ curl http://localhost:3000/v1/images/generations \
 </details>
 
 Available models depend on the upstream accounts and the current `/v1/models` response.
+
+Administrators can open **Settings → Model List** to fetch upstream chat model IDs from one ChatGPT Web account, choose which IDs to enable, and save the selection. Image models use a separate catalogue.
+
+`gpt-5.6-luna` is an explicit alias for ChatGPT Free Web accounts. Requests for this alias use only Free Web accounts and send `auto` upstream so ChatGPT applies the plan's default model. Requests for `gpt-5.6` on a Free Web account are routed through the same plan default.
 
 ## Configuration
 

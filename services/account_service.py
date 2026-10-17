@@ -2089,7 +2089,13 @@ class AccountService:
             f"no image account available after {len(attempted_tokens)} attempts",
         )
 
-    def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def get_text_access_token(
+            self,
+            excluded_tokens: set[str] | None = None,
+            *,
+            plan_type: str | None = None,
+            source_type: str | None = None,
+    ) -> str:
         self._refresh_accounts_snapshot_if_stale()
         attempted = set(excluded_tokens or set())
         while True:
@@ -2102,6 +2108,8 @@ class AccountService:
                         allow_limited=True,
                         allow_image_pending=True,
                     )
+                       and self._account_matches_plan_type(account, plan_type)
+                       and self._account_matches_source_type(account, source_type)
                        and (token := account.get("access_token") or "")
                        and token not in attempted
                 ]

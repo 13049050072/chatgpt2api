@@ -19,7 +19,7 @@ from api.gallery_contract import (
 )
 from api.monitor_contract import MonitorRecordDetailView, RealtimeMonitorView
 from contracts.auth import AuthView
-from contracts.models import ModelCatalogView
+from contracts.models import ModelCatalogDiscoveryView, ModelCatalogView
 from contracts.proxy import (
     ProxyDefaultsMutation,
     ProxyDefaultsRequest,
@@ -65,6 +65,11 @@ from services.image_storage_service import ImageStorageError, image_storage_serv
 from services.image_tags_service import set_tags
 from services.log_service import log_service
 from services.model_catalog_service import get_model_catalog
+from services.model_catalog_discovery_service import (
+    ModelCatalogDiscoveryError,
+    ModelCatalogDiscoveryUnavailableError,
+    model_catalog_discovery_service,
+)
 from services.monitor_view import build_monitor_record_view, build_monitor_view
 from services.proxy_management_service import (
     ProxyGroupInUseError,
@@ -261,6 +266,16 @@ def create_router(app_version: str) -> APIRouter:
     async def model_catalog(authorization: str | None = Header(default=None)):
         require_identity(authorization)
         return await run_in_threadpool(get_model_catalog)
+
+    @router.post("/api/model-catalog/discover", response_model=ModelCatalogDiscoveryView)
+    async def discover_model_catalog(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return await run_in_threadpool(model_catalog_discovery_service.discover)
+        except ModelCatalogDiscoveryUnavailableError as exc:
+            raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+        except ModelCatalogDiscoveryError as exc:
+            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
     @router.get("/api/images", response_model=GalleryPage)
     async def get_images(

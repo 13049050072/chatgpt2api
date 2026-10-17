@@ -154,7 +154,7 @@ Authorization: Bearer <auth-key>
 
 | 接口                                | 方法         | 说明                                                 |
 | :---------------------------------- | :----------- | :--------------------------------------------------- |
-| `/v1/models`                        | `GET`        | 返回与控制台一致的模型目录，默认聊天模型为 `gpt-5.6`、`auto` |
+| `/v1/models`                        | `GET`        | 返回与控制台一致的已启用模型目录，默认聊天模型包含 `gpt-6`、`gpt-5.6`、`gpt-5.6-luna`、`auto` |
 | `/v1/chat/completions`              | `POST`       | 文本、搜索和图片场景的 Chat Completions 入口         |
 | `/v1/responses`                     | `POST`       | 支持文本、搜索和图片工具调用的 Responses 入口        |
 | `/v1/messages`                      | `POST`       | Anthropic Messages 兼容入口                          |
@@ -194,6 +194,10 @@ curl http://localhost:3000/v1/images/generations \
 </details>
 
 实际可用模型以上游账号和 `/v1/models` 返回值为准。
+
+管理员可在“设置 → 模型列表”从一个 ChatGPT Web 账号读取上游对话模型目录，勾选后保存；图片模型继续使用独立列表。
+
+`gpt-5.6-luna` 是 ChatGPT Free Web 账号的显式模型别名：请求会限定使用 Free Web 账号，并由上游 `auto` 路由到该套餐的默认模型。Free Web 账号收到 `gpt-5.6` 请求时也会按套餐默认模型路由。
 
 ## 关键配置
 

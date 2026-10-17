@@ -23,9 +23,20 @@ second implementation of service state transitions.
 
 ### Model catalog and image compatibility
 
-`ModelCatalogService` defaults chat models to `gpt-5.6` and `auto` and retains
-explicit configured overrides. The console and `/v1/models` consume the same
-catalog; listing models does not query upstream or append upstream-only entries.
+`ModelCatalogService` defaults chat models to `gpt-5.6`, `gpt-5.6-luna`, and
+`auto` (plus `gpt-6`) and retains explicit configured overrides. The console,
+Settings, and `/v1/models` consume the same catalogue; listing models does not
+query upstream or append upstream-only entries. `gpt-5.6-luna` selects only
+Free Web accounts and is translated to the upstream `auto` route because Luna
+is the Free plan default, not a separately selectable ChatGPT Web model. A
+`gpt-5.6` request on a Free Web account is also translated to `auto`.
+
+`POST /api/model-catalog/discover` is an admin-only Settings operation. Its
+`ModelCatalogDiscoveryService` reads the upstream catalogue through one valid
+ChatGPT Web account and reuses `OpenAIBackendAPI.list_models()`. It returns
+candidate chat IDs without account credentials; known image IDs are excluded.
+The Settings editor persists the selected chat IDs through
+`SettingsManagementService` as `model_catalog.chat_models`.
 
 `utils.helper.WEB_IMAGE_MODELS` owns the built-in Web image identifiers:
 `gpt-image-2`, `gpt-image-2.5`, `gpt-image-2.5-flare`, and

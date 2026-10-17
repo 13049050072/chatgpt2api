@@ -23,6 +23,16 @@ export interface ModelCatalogResponse {
   openai_models_endpoint: '/v1/models'
 }
 
+export interface ModelCatalogDiscoveryResponse {
+  object: 'model_catalog_discovery'
+  models: string[]
+  fetched_at: string
+}
+
 export const modelsApi = {
   catalog: () => apiClient.get<never, ModelCatalogResponse>('/api/model-catalog'),
+  discover: () => apiClient.post<Record<string, never>, ModelCatalogDiscoveryResponse>(
+    '/api/model-catalog/discover',
+    {},
+  ),
 }

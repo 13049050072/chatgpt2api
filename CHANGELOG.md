@@ -2,6 +2,9 @@
 
 ## Unreleased
 
++ [新增] 设置页增加对话模型目录编辑，可从一个 ChatGPT Web 账号读取上游模型 ID、选择启用并同步到 `/v1/models`；默认目录增加 `gpt-6`。
++ [新增] 聊天模型目录增加 `gpt-5.6-luna`，仅路由到 Free Web 账号并交由上游 `auto` 选择套餐默认模型；Free Web 账号收到 `gpt-5.6` 时也使用该默认路由。
+
 ## 3.2.3 - 2026-09-09
 
 + [新增] Python 图片接口和共享模型列表支持 `gpt-image-2.5`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`，通过 ChatGPT Web 的 `auto` 路由兼容，不包含 `exact` 别名。

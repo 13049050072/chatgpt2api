@@ -41,6 +41,7 @@ from services.image_failure import (
     structured_upstream_codes,
     terminal_assistant_text,
 )
+from services.model_catalog_service import resolve_upstream_chat_model
 from services.protocol.reasoning import normalize_thinking_effort
 from services.proxy_service import ProxyRuntimeProfile, proxy_settings
 from utils.file_names import sanitize_public_filename
@@ -803,7 +804,7 @@ class OpenAIBackendAPI:
         payload = {
             "action": "next",
             "messages": self._api_messages_to_conversation_messages(messages),
-            "model": model,
+            "model": resolve_upstream_chat_model(model, self.account),
             "parent_message_id": new_uuid(),
             "conversation_mode": {"kind": "primary_assistant"},
             "conversation_origin": None,

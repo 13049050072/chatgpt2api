@@ -16,6 +16,7 @@ from contracts.settings import (
     GenBoxPushSettings,
     ImageStorageSettings,
     InfiniteCanvasSettings,
+    ModelCatalogSettings,
     PublicInfiniteCanvasSettings,
     PublicThirdPartyAppsView,
     PublicThirdPartyAppsSettings,
@@ -42,6 +43,7 @@ from services.config import (
     DEFAULT_THIRD_PARTY_APPS,
     config,
 )
+from services.model_catalog_service import FALLBACK_CHAT_MODELS, get_effective_chat_models
 
 
 SETTINGS_SCHEMA_VERSION = 1
@@ -76,6 +78,7 @@ _MANAGED_TOP_LEVEL_FIELDS = (
     "genbox_push",
     "backup",
     "third_party_apps",
+    "model_catalog",
 )
 
 _SENSITIVE_PATHS = (
@@ -295,6 +298,7 @@ _FIELD_SPECS: dict[str, dict[str, Any]] = {
     },
     "third_party_apps.infinite_canvas.enabled": _field_metadata(False),
     "third_party_apps.infinite_canvas.url": _field_metadata("https://canvas.best"),
+    "model_catalog.chat_models": _field_metadata(list(FALLBACK_CHAT_MODELS)),
 }
 
 
@@ -619,6 +623,9 @@ class SettingsManagementService:
                     ),
                 ),
             ),
+            model_catalog=ModelCatalogSettings(
+                chat_models=get_effective_chat_models(effective),
+            ),
         )
 
     def _metadata(self, stored: dict[str, Any]) -> dict[str, SettingsFieldMetadata]:
@@ -664,6 +671,8 @@ class SettingsManagementService:
         for key in _MANAGED_TOP_LEVEL_FIELDS:
             if key == "base_url":
                 relevant[key] = _url(effective.get(key))
+            elif key == "model_catalog" and key not in stored:
+                relevant[key] = {"chat_models": get_effective_chat_models(effective)}
             elif key in stored:
                 relevant[key] = stored.get(key)
             else:

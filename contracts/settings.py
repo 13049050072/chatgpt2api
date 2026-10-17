@@ -179,6 +179,36 @@ class ProxyRuntimePatch(_StrictModel):
     clearance: ProxyRuntimeClearancePatch = Field(default_factory=ProxyRuntimeClearancePatch)
 
 
+class _ModelCatalogFields(_StrictModel):
+    chat_models: list[str] = Field(min_length=1, max_length=500)
+
+    @field_validator("chat_models")
+    @classmethod
+    def normalize_chat_models(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            model = item.strip()
+            if not model:
+                raise ValueError("chat model IDs must not be blank")
+            if len(model) > 200 or any(ord(char) < 32 or ord(char) == 127 for char in model):
+                raise ValueError("chat model IDs must be at most 200 characters without control characters")
+            if model not in seen:
+                normalized.append(model)
+                seen.add(model)
+        if not normalized:
+            raise ValueError("at least one chat model must remain enabled")
+        return normalized
+
+
+class ModelCatalogSettings(_ModelCatalogFields):
+    pass
+
+
+class ModelCatalogPatch(_ModelCatalogFields):
+    pass
+
+
 class _SettingsEditableFields(_StrictModel):
     proxy_runtime: ProxyRuntimePatch = Field(default_factory=ProxyRuntimePatch)
     base_url: str = ""
@@ -209,6 +239,14 @@ class _SettingsEditableFields(_StrictModel):
     genbox_push: GenBoxPushPatch = Field(default_factory=GenBoxPushPatch)
     backup: BackupPatch = Field(default_factory=BackupPatch)
     third_party_apps: ThirdPartyAppsSettings = Field(default_factory=ThirdPartyAppsSettings)
+    model_catalog: ModelCatalogPatch | None = None
+
+    @field_validator("model_catalog")
+    @classmethod
+    def require_model_catalog_when_supplied(cls, value: ModelCatalogPatch | None) -> ModelCatalogPatch:
+        if value is None:
+            raise ValueError("model_catalog must not be null")
+        return value
 
     @field_validator("log_levels")
     @classmethod
@@ -222,6 +260,7 @@ class SettingsValues(_SettingsEditableFields):
     image_storage: ImageStorageSettings = Field(default_factory=ImageStorageSettings)
     genbox_push: GenBoxPushSettings = Field(default_factory=GenBoxPushSettings)
     backup: BackupSettings = Field(default_factory=BackupSettings)
+    model_catalog: ModelCatalogSettings
 
 
 class SettingsPatch(_SettingsEditableFields):

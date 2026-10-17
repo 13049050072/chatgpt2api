@@ -129,6 +129,9 @@ export interface Settings {
       url: string
     }
   }
+  model_catalog: {
+    chat_models: string[]
+  }
 }
 
 export interface SettingsFieldMetadata {
