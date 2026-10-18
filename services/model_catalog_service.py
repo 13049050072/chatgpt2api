@@ -16,35 +16,13 @@ from services.config import config
 from utils.helper import CODEX_IMAGE_MODEL, WEB_IMAGE_MODELS
 
 
-GPT_FREE_CHAT_MODEL = "gpt-5.6-luna"
-
 FALLBACK_CHAT_MODELS = [
-    "gpt-6",
-    "gpt-5.6",
-    GPT_FREE_CHAT_MODEL,
+    "gpt-6-luna",
+    "gpt-5.6-luna",
     "auto",
 ]
 
 FALLBACK_IMAGE_MODELS = list(WEB_IMAGE_MODELS)
-
-
-def text_account_requirements(model: str) -> tuple[str | None, str | None]:
-    if str(model or "").strip().lower() == GPT_FREE_CHAT_MODEL:
-        return "Free", "web"
-    return None, None
-
-
-def resolve_upstream_chat_model(model: str, account: dict[str, Any]) -> str:
-    requested = str(model or "auto").strip() or "auto"
-    account_type = account_service._normalize_account_type(account.get("type"))
-    source_type = account_service._normalize_source_type(account.get("source_type"))
-    if (
-        source_type == "web"
-        and account_type == "free"
-        and requested.lower() in {"gpt-5.6", GPT_FREE_CHAT_MODEL}
-    ):
-        return "auto"
-    return requested
 
 
 def _normalize_list(raw: object) -> list[str]:

@@ -40,7 +40,6 @@ from services.image_failure import (
 )
 from services.image_storage_service import image_storage_service
 from services.image_upscale_service import upscale_image_if_needed
-from services.model_catalog_service import text_account_requirements
 from services.openai_backend_api import OpenAIBackendAPI
 from services.proxy_service import ImageEgressDeadlineError, proxy_settings
 from services.realtime_monitor_service import realtime_monitor_service
@@ -1103,14 +1102,8 @@ def _remember_text_account(backend: OpenAIBackendAPI, access_token: str) -> str:
     return email
 
 
-def text_backend(model: str = "auto") -> OpenAIBackendAPI:
-    plan_type, source_type = text_account_requirements(model)
-    access_token = account_service.get_text_access_token(
-        plan_type=plan_type,
-        source_type=source_type,
-    )
-    if plan_type and not access_token:
-        raise RuntimeError("no available ChatGPT Free web account")
+def text_backend() -> OpenAIBackendAPI:
+    access_token = account_service.get_text_access_token()
     backend = OpenAIBackendAPI(access_token=access_token)
     _remember_text_account(backend, access_token)
     return backend
@@ -1173,12 +1166,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                     })
                 auth_failures += 1
             if auth_failure and not emitted and auth_failures < 2:
-                plan_type, source_type = text_account_requirements(request.model)
-                token = account_service.get_text_access_token(
-                    attempted_tokens,
-                    plan_type=plan_type,
-                    source_type=source_type,
-                )
+                token = account_service.get_text_access_token(attempted_tokens)
                 if token:
                     continue
             if token and not getattr(exc, "account_email", ""):

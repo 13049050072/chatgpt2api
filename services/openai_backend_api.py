@@ -41,7 +41,6 @@ from services.image_failure import (
     structured_upstream_codes,
     terminal_assistant_text,
 )
-from services.model_catalog_service import resolve_upstream_chat_model
 from services.protocol.reasoning import normalize_thinking_effort
 from services.proxy_service import ProxyRuntimeProfile, proxy_settings
 from utils.file_names import sanitize_public_filename
@@ -801,10 +800,11 @@ class OpenAIBackendAPI:
             thinking_effort: str = "",
     ) -> Dict[str, Any]:
         """把标准 messages 构造成 web 对话请求体。"""
+        upstream_model = str(model or "auto").strip() or "auto"
         payload = {
             "action": "next",
             "messages": self._api_messages_to_conversation_messages(messages),
-            "model": resolve_upstream_chat_model(model, self.account),
+            "model": upstream_model,
             "parent_message_id": new_uuid(),
             "conversation_mode": {"kind": "primary_assistant"},
             "conversation_origin": None,

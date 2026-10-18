@@ -23,13 +23,13 @@ second implementation of service state transitions.
 
 ### Model catalog and image compatibility
 
-`ModelCatalogService` defaults chat models to `gpt-5.6`, `gpt-5.6-luna`, and
-`auto` (plus `gpt-6`) and retains explicit configured overrides. The console,
-Settings, and `/v1/models` consume the same catalogue; listing models does not
-query upstream or append upstream-only entries. `gpt-5.6-luna` selects only
-Free Web accounts and is translated to the upstream `auto` route because Luna
-is the Free plan default, not a separately selectable ChatGPT Web model. A
-`gpt-5.6` request on a Free Web account is also translated to `auto`.
+`ModelCatalogService` defaults chat models to `gpt-6-luna`, `gpt-5.6-luna`, and
+`auto` and retains explicit configured overrides. The console, Settings, and
+`/v1/models` consume the same catalogue; listing models does not query upstream
+or append upstream-only entries. Text requests pass the selected model ID to
+the upstream unchanged and account selection is not restricted by plan type or
+Web/Codex source. Web requests use the Conversation endpoint; Codex source
+accounts use the Codex Responses endpoint.
 
 `POST /api/model-catalog/discover` is an admin-only Settings operation. Its
 `ModelCatalogDiscoveryService` reads the upstream catalogue through one valid

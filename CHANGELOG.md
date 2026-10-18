@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-+ [新增] 设置页增加对话模型目录编辑，可从一个 ChatGPT Web 账号读取上游模型 ID、选择启用并同步到 `/v1/models`；默认目录增加 `gpt-6`。
-+ [新增] 聊天模型目录增加 `gpt-5.6-luna`，仅路由到 Free Web 账号并交由上游 `auto` 选择套餐默认模型；Free Web 账号收到 `gpt-5.6` 时也使用该默认路由。
++ [新增] 设置页增加对话模型目录编辑，可从一个 ChatGPT Web 账号读取上游模型 ID、选择启用并同步到 `/v1/models`；默认聊天模型为 `gpt-6-luna`、`gpt-5.6-luna` 和 `auto`。
++ [修复] 对话请求按原模型 ID 发往上游；`gpt-5.6-luna` 和 `gpt-6-luna` 不再限制套餐或 Web/Codex 账号来源，移除未经验证的 `gpt-6` 与 `gpt-5.6` 默认项。
 
 ## 3.2.3 - 2026-09-09
 

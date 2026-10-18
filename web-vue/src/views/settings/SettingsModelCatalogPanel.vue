@@ -61,7 +61,7 @@
             v-model.trim="newModel"
             block
             aria-label="手动添加模型 ID"
-            placeholder="手动添加模型 ID，例如 gpt-6"
+            placeholder="手动添加模型 ID，例如 gpt-6-luna"
             @keydown.enter.prevent="addModel"
           />
           <Button size="sm" variant="outline" :disabled="!newModel.trim()" @click="addModel">

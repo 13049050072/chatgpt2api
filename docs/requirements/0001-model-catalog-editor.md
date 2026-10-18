@@ -34,15 +34,18 @@ separate catalogue and request path.
 - Add a Settings tab to select, manually add, and persist enabled chat model IDs.
 - Keep currently enabled IDs visible if a discovery response does not include
   them, and require at least one enabled chat model.
-- Add `gpt-6` to the fallback chat model list requested earlier in this task.
+- Use the tested `gpt-6-luna` and `gpt-5.6-luna` IDs in the fallback chat model
+  list, alongside `auto`; do not expose the unverified `gpt-6` or `gpt-5.6`
+  identifiers as fallback models.
+- Pass selected text model IDs through unchanged for all account plan types and
+  both Web and Codex source accounts.
 - Make the saved catalogue the source consumed by the console and `/v1/models`.
 
 ## Non-goals
 
 - Do not discover or edit image models through the chat model endpoint.
 - Do not compare or query every account in the pool.
-- Do not change upstream request routing, account selection for completions, or
-  model display-name metadata.
+- Do not change upstream model discovery or model display-name metadata.
 - Do not deploy this implementation as part of the model-catalog feature work.
 
 ## Domain language

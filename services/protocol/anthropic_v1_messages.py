@@ -110,7 +110,7 @@ def message_request(body: dict[str, Any]) -> MessageRequest:
     payload = preprocess_payload(dict(body))
     model = str(payload.get("model") or "auto").strip() or "auto"
     return MessageRequest(
-        backend=text_backend(model),
+        backend=text_backend(),
         messages=normalize_messages(payload.get("messages"), payload.get("system")),
         model=model,
         tools=payload.get("tools"),
