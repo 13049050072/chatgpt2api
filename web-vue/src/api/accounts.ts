@@ -3,6 +3,7 @@ import type { ProxyGroup } from './proxy'
 
 export type AccountLane = 'fast' | 'thinking' | 'pro'
 export type AccountSourceType = 'web' | 'codex'
+export type AccountSourceFilter = 'all' | AccountSourceType
 export type AccountBackendStatus = '正常' | '限流' | '异常' | '禁用'
 export type AccountStatusCategory = 'normal' | 'limited' | 'abnormal' | 'disabled'
 export type AccountEnabledAction = 'enable' | 'disable'
@@ -252,6 +253,7 @@ export type AccountListParams = {
   keyword?: string
   status?: 'all' | AccountStatusCategory
   group_id?: string
+  source_type?: AccountSourceFilter
 }
 
 export type AccountSelectionScope = {
@@ -261,6 +263,7 @@ export type AccountSelectionScope = {
   keyword?: string
   status?: 'all' | AccountStatusCategory
   group_id?: string
+  source_type?: AccountSourceFilter
 }
 
 export type AccountSelectionTarget = readonly string[] | AccountSelectionScope

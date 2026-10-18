@@ -73,6 +73,7 @@ class AccountSelectionScope(BaseModel):
     keyword: str = ""
     status: str = "all"
     group_id: str = "all"
+    source_type: Literal["all", "web", "codex"] = "all"
 
 
 class AccountSelectionPreviewRequest(BaseModel):
@@ -966,17 +967,26 @@ def _account_matches_group(account: dict[str, Any], group_id: str) -> bool:
     return current == group_id
 
 
+def _account_matches_source_type(account: dict[str, Any], source_type: str) -> bool:
+    source_type = source_type.strip().lower()
+    if not source_type or source_type == "all":
+        return True
+    return _clean_text(account.get("source_type") or "web").lower() == source_type
+
+
 def _account_matches_filters(
         account: dict[str, Any],
         *,
         keyword: str,
         status: str,
         group_id: str,
+        source_type: str,
 ) -> bool:
     return (
         _account_matches_keyword(account, keyword)
         and _status_matches_filter(account, status)
         and _account_matches_group(account, group_id)
+        and _account_matches_source_type(account, source_type)
     )
 
 
@@ -986,6 +996,7 @@ def _filtered_accounts(
         keyword: str,
         status: str,
         group_id: str,
+        source_type: str,
 ) -> list[dict[str, Any]]:
     return [
         account
@@ -995,6 +1006,7 @@ def _filtered_accounts(
             keyword=keyword,
             status=status,
             group_id=group_id,
+            source_type=source_type,
         )
     ]
 
@@ -1009,6 +1021,7 @@ def _account_selection_members(
             keyword=selection.keyword,
             status=selection.status,
             group_id=selection.group_id,
+            source_type=selection.source_type,
         )
 
     members: list[tuple[str, str]] = []
@@ -1093,6 +1106,7 @@ def _accounts_page(
         keyword: str,
         status: str,
         group_id: str,
+        source_type: str,
 ) -> dict[str, Any]:
     items = account_service.list_accounts()
     filtered = _filtered_accounts(
@@ -1100,6 +1114,7 @@ def _accounts_page(
         keyword=keyword,
         status=status,
         group_id=group_id,
+        source_type=source_type,
     )
     safe_page = max(1, page)
     safe_page_size = max(1, min(page_size, 500))
@@ -1212,6 +1227,7 @@ def create_router() -> APIRouter:
             keyword: str = "",
             status: str = "all",
             group_id: str = "all",
+            source_type: Literal["all", "web", "codex"] = "all",
             authorization: str | None = Header(default=None),
     ):
         require_admin(authorization)
@@ -1221,6 +1237,7 @@ def create_router() -> APIRouter:
             keyword=keyword,
             status=status,
             group_id=group_id,
+            source_type=source_type,
         )
 
     @router.post("/api/accounts/selection-preview")

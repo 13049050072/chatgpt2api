@@ -26,6 +26,10 @@
 | 可编辑文件 | `/v1/editable-file-tasks`、`services/editable_file_task_service.py` | Studio 的独立文件任务运行时 |
 | 提示词库 | `/api/prompts`、`contracts/prompts.py` | Studio 和设置中的提示词来源界面 |
 
+`GET /api/accounts` 支持 `source_type=all|web|codex` 服务端列表筛选。筛选模式的
+`AccountSelectionScope` 携带相同的 `source_type`，因此“全选匹配结果”及其预览会
+沿用当前来源条件。默认值仍为 `all`，兼容现有调用方。
+
 ## 概览中心
 
 `GET /api/dashboard` 一次返回三个所有权清晰的投影：`ranges` 是 Application Database 中 Dashboard 指标的 `24h`、`7d`、`30d` 持久化汇总，`runtime` 是当前进程与运行环境的实时采样，`operations` 是当前 Active Requests 数量。前端只校验并展示这些字段，不扫描 Call Records，也不从实时监控详情反算并发。

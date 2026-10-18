@@ -2,6 +2,7 @@ import { computed, ref, toRef } from 'vue'
 import { accountsApi } from '@/api/accounts'
 import type {
   Account,
+  AccountSourceFilter,
 } from '@/api/accounts'
 import { usePageRuntime } from '@/composables/usePageRuntime'
 import { usePagedQuery } from '@/composables/usePageQuery'
@@ -37,6 +38,7 @@ export function useAccountsPage() {
   const keyword = ref('')
   const statusFilter = ref<AccountStatusFilter>('all')
   const groupFilter = ref('all')
+  const sourceFilter = ref<AccountSourceFilter>('all')
   const pageSize = ref(DEFAULT_PAGE_SIZE)
   const accounts = ref<Account[]>([])
   const accountAllTotal = ref(0)
@@ -56,6 +58,7 @@ export function useAccountsPage() {
       keyword: keyword.value.trim(),
       status: statusFilter.value,
       group_id: groupFilter.value,
+      source_type: sourceFilter.value,
     }),
     resolvePage: (res) => res.page,
     resolvePageCount: (res) => {
@@ -94,6 +97,11 @@ export function useAccountsPage() {
       value: group.id,
     })),
   ])
+  const sourceFilterOptions = [
+    { label: '全部来源', value: 'all' },
+    { label: 'Web', value: 'web' },
+    { label: 'Codex', value: 'codex' },
+  ]
 
   const accountSelection = useAccountSelectionRuntime({
     accounts,
@@ -103,6 +111,7 @@ export function useAccountsPage() {
     keyword,
     status: statusFilter,
     groupId: groupFilter,
+    sourceType: sourceFilter,
   })
   const selectedCount = accountSelection.selectedCount
   const scopedSelectionActive = accountSelection.scopedSelectionActive
@@ -349,6 +358,7 @@ export function useAccountsPage() {
     keyword,
     statusFilter,
     groupFilter,
+    sourceFilter,
     pageSizeDefault: DEFAULT_PAGE_SIZE,
     pageSizeOptions: ACCOUNT_PAGE_SIZE_OPTIONS,
     reloadTimerKey: LIST_RELOAD_TIMER_KEY,
@@ -397,8 +407,10 @@ export function useAccountsPage() {
     keyword,
     statusFilter,
     groupFilter,
+    sourceFilter,
     statusFilterOptions,
     groupFilterOptions,
+    sourceFilterOptions,
     editingId,
     accounts,
     accountListTotal,

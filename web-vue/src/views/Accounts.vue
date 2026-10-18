@@ -91,6 +91,16 @@
             </FilterToolbar>
           </div>
 
+          <div class="accounts-toolbar-group accounts-toolbar-group-source">
+            <ConsoleSegmentedTabs
+              :model-value="sourceFilter"
+              :options="sourceFilterOptions"
+              aria-label="账号来源筛选"
+              fit="content"
+              @update:model-value="setSourceFilter"
+            />
+          </div>
+
           <FilterToolbar class="accounts-toolbar-group accounts-toolbar-group-refresh" :bordered="false" gap="tight">
             <Button
               size="sm"
@@ -771,7 +781,9 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import { Button, Checkbox, EmptyState, GroupedSelectMenu, Input, TableShell, ViewModeSwitch } from 'nanocat-ui'
+import type { Account } from '@/api/accounts'
 import FilterToolbar from '@/components/ai/FilterToolbar.vue'
+import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import FloatingActionMenu from '@/components/ai/FloatingActionMenu.vue'
 import FormSection from '@/components/ai/FormSection.vue'
 import ImportModePanel from '@/components/ai/ImportModePanel.vue'
@@ -786,7 +798,6 @@ import PagePanel from '@/components/ai/PagePanel.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
 import SurfaceBox from '@/components/ai/SurfaceBox.vue'
-import type { Account } from '@/api/accounts'
 import AccountGridCard from './accounts/AccountGridCard.vue'
 import AccountImportTargetGroupField from './accounts/AccountImportTargetGroupField.vue'
 import AccountOperationDrawer from './accounts/AccountOperationDrawer.vue'
@@ -823,8 +834,10 @@ const {
   keyword,
   statusFilter,
   groupFilter,
+  sourceFilter,
   statusFilterOptions,
   groupFilterOptions,
+  sourceFilterOptions,
   editingId,
   accounts,
   accountListTotal,
@@ -963,6 +976,11 @@ const accountSourceOptions = [
   { label: 'Web', value: 'web' },
   { label: 'Codex', value: 'codex' },
 ] as const
+function setSourceFilter(value: string | number) {
+  if (value === 'all' || value === 'web' || value === 'codex') {
+    sourceFilter.value = value
+  }
+}
 const importModalBusy = computed(() => importBusy.value || remoteImportBusy.value)
 const resolvedImportTargetGroupId = computed(() => (
   importTargetGroupValue.value === '__preserve__' ? null : importTargetGroupValue.value
@@ -1086,6 +1104,10 @@ async function handleAccountFileChange(event: Event) {
 
 .accounts-toolbar-group {
   min-width: 0;
+}
+
+.accounts-toolbar-group-source {
+  flex: 0 0 auto;
 }
 
 .accounts-toolbar-action-cluster {
