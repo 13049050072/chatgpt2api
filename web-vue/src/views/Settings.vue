@@ -80,12 +80,6 @@
         </div>
       </div>
 
-      <SettingsModelCatalogPanel
-        v-else-if="activeSettingsTab === 'models'"
-        :models="localSettings.model_catalog.chat_models"
-        @update:models="localSettings.model_catalog.chat_models = $event"
-      />
-
       <SettingsStorageReviewPanel
         v-else-if="activeSettingsTab === 'storage'"
         :settings="localSettings"
@@ -323,7 +317,6 @@ import SettingsBackupPanel from '@/views/settings/SettingsBackupPanel.vue'
 import SettingsExternalSourceModals from '@/views/settings/SettingsExternalSourceModals.vue'
 import SettingsExternalSourcesPanel from '@/views/settings/SettingsExternalSourcesPanel.vue'
 import SettingsIntegrationsPanel from '@/views/settings/SettingsIntegrationsPanel.vue'
-import SettingsModelCatalogPanel from '@/views/settings/SettingsModelCatalogPanel.vue'
 import SettingsPromptSourcesPanel from '@/views/settings/SettingsPromptSourcesPanel.vue'
 import SettingsUserKeyModals from '@/views/settings/SettingsUserKeyModals.vue'
 import SettingsStorageReviewPanel from '@/views/settings/SettingsStorageReviewPanel.vue'

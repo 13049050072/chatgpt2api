@@ -195,9 +195,7 @@ curl http://localhost:3000/v1/images/generations \
 
 实际可用模型以上游账号和 `/v1/models` 返回值为准。
 
-管理员可在“设置 → 模型列表”从一个 ChatGPT Web 账号读取上游对话模型目录，勾选后保存；图片模型继续使用独立列表。
-
-默认聊天目录包含实测可用的 `gpt-6-luna`、`gpt-5.6-luna` 和 `auto`。请求会将所选模型 ID 原样发送给上游；Luna 模型可由任意套餐类型的 Web 或 Codex 来源账号处理，不会被改写为 `auto`。
+对话模型目录固定提供实测可用的 `gpt-6-luna`、`gpt-5.6-luna` 和 `auto`；旧设置不会覆盖这三个 ID。请求会将模型 ID 原样发送给上游，Luna 模型可由任意套餐类型的 Web 或 Codex 来源账号处理。
 
 ## 关键配置
 

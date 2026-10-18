@@ -180,9 +180,7 @@ curl http://localhost:3000/v1/images/generations \
 
 Available models depend on the upstream accounts and the current `/v1/models` response.
 
-Administrators can open **Settings → Model List** to fetch upstream chat model IDs from one ChatGPT Web account, choose which IDs to enable, and save the selection. Image models use a separate catalogue.
-
-The default chat catalogue includes the tested `gpt-6-luna`, `gpt-5.6-luna`, and `auto` models. Requests pass the selected model ID through unchanged; Luna models can use any plan type and either Web or Codex source accounts, without being rewritten to `auto`.
+The chat catalogue is fixed to the tested `gpt-6-luna`, `gpt-5.6-luna`, and `auto` IDs; legacy settings cannot override them. Requests pass the model ID through unchanged, and Luna models can use any plan type and either Web or Codex source accounts.
 
 ## Configuration
 

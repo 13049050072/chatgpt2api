@@ -1,6 +1,9 @@
 # 0001: Model Catalog Editor
 
-Status: pending-verification
+Status: superseded
+
+This historical requirement was superseded on 2026-10-18. The user withdrew the
+Settings editor request and chose a fixed built-in chat catalogue instead.
 
 - Owner: ChatGPT2API
 - Created: 2026-10-18

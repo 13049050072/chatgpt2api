@@ -66,17 +66,3 @@ class ModelCatalogView(_StrictModel):
         ):
             raise ValueError("high resolution models must be listed in image_models")
         return self
-
-
-class ModelCatalogDiscoveryView(_StrictModel):
-    object: Literal["model_catalog_discovery"] = "model_catalog_discovery"
-    models: tuple[str, ...]
-    fetched_at: str = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def validate_models(self) -> "ModelCatalogDiscoveryView":
-        if not self.models:
-            raise ValueError("models must not be empty")
-        if len(self.models) != len(set(self.models)):
-            raise ValueError("models must be unique")
-        return self

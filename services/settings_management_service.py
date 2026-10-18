@@ -43,7 +43,7 @@ from services.config import (
     DEFAULT_THIRD_PARTY_APPS,
     config,
 )
-from services.model_catalog_service import FALLBACK_CHAT_MODELS, get_effective_chat_models
+from services.model_catalog_service import get_effective_chat_models
 
 
 SETTINGS_SCHEMA_VERSION = 1
@@ -298,7 +298,6 @@ _FIELD_SPECS: dict[str, dict[str, Any]] = {
     },
     "third_party_apps.infinite_canvas.enabled": _field_metadata(False),
     "third_party_apps.infinite_canvas.url": _field_metadata("https://canvas.best"),
-    "model_catalog.chat_models": _field_metadata(list(FALLBACK_CHAT_MODELS)),
 }
 
 
@@ -671,7 +670,7 @@ class SettingsManagementService:
         for key in _MANAGED_TOP_LEVEL_FIELDS:
             if key == "base_url":
                 relevant[key] = _url(effective.get(key))
-            elif key == "model_catalog" and key not in stored:
+            elif key == "model_catalog":
                 relevant[key] = {"chat_models": get_effective_chat_models(effective)}
             elif key in stored:
                 relevant[key] = stored.get(key)

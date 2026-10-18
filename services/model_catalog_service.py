@@ -43,24 +43,9 @@ def _settings_dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _configured_chat_models(settings: dict[str, Any]) -> list[str]:
-    catalog = _settings_dict(settings.get("model_catalog"))
-    explicit = _normalize_list(catalog.get("chat_models"))
-    if explicit:
-        return explicit
-
-    combined: list[str] = []
-    for key in ("base_chat_models", "specialized_chat_models", "image_capable_chat_models"):
-        for model in _normalize_list(catalog.get(key)):
-            if model not in combined:
-                combined.append(model)
-    return combined
-
-
-def get_effective_chat_models(settings: dict[str, Any]) -> list[str]:
-    """Return the effective chat catalogue for a configuration snapshot."""
-    configured = _configured_chat_models(settings)
-    return _unique(configured or list(FALLBACK_CHAT_MODELS))
+def get_effective_chat_models(_settings: dict[str, Any] | None = None) -> list[str]:
+    """Return the built-in chat catalogue; legacy settings cannot remove IDs."""
+    return list(FALLBACK_CHAT_MODELS)
 
 
 def _configured_image_models(settings: dict[str, Any]) -> list[str]:
@@ -128,7 +113,7 @@ class ModelCatalogService:
         effective_chat_models = get_effective_chat_models(settings)
         configured_image_models = _configured_image_models(settings)
 
-        chat_source = "config" if _configured_chat_models(settings) else "fallback"
+        chat_source = "fallback"
         chat_models = effective_chat_models
 
         if configured_image_models:
