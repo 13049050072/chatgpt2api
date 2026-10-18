@@ -26,10 +26,10 @@ second implementation of service state transitions.
 `ModelCatalogService` always exposes the built-in chat IDs `gpt-6-luna`,
 `gpt-5.6-luna`, and `auto`; legacy saved chat lists cannot override them. The
 console and `/v1/models` consume the same catalogue. Text requests pass the
-selected model ID upstream unchanged, and account selection is not restricted
-by plan type or Web/Codex source. Web requests use the Conversation endpoint;
-Codex source accounts use the Codex Responses endpoint. Chat model discovery
-and editing are not exposed in Settings.
+selected model ID upstream unchanged. Text and search requests select Web
+source accounts across all plan types because ordinary replies require the Web
+Conversation endpoint. Codex source accounts are not selected for ordinary text
+replies. Chat model discovery and editing are not exposed in Settings.
 
 `utils.helper.WEB_IMAGE_MODELS` owns the built-in Web image identifiers:
 `gpt-image-2`, `gpt-image-2.5`, `gpt-image-2.5-flare`, and

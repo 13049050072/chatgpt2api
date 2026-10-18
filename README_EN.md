@@ -180,7 +180,7 @@ curl http://localhost:3000/v1/images/generations \
 
 Available models depend on the upstream accounts and the current `/v1/models` response.
 
-The chat catalogue is fixed to the tested `gpt-6-luna`, `gpt-5.6-luna`, and `auto` IDs; legacy settings cannot override them. Requests pass the model ID through unchanged, and Luna models can use any plan type and either Web or Codex source accounts.
+The chat catalogue is fixed to the tested `gpt-6-luna`, `gpt-5.6-luna`, and `auto` IDs; legacy settings cannot override them. Requests pass the model ID through unchanged. Text chat and search select Web source accounts across all plan types; Codex source accounts are not used for ordinary text replies.
 
 ## Configuration
 

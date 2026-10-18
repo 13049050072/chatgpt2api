@@ -52,7 +52,10 @@ def execute_search(
     last_auth_error: Exception | None = None
 
     while True:
-        access_token = account_service.get_text_access_token(attempted_tokens)
+        access_token = account_service.get_text_access_token(
+            attempted_tokens,
+            source_type="web",
+        )
         if not access_token or access_token in attempted_tokens:
             if last_auth_error is not None:
                 raise last_auth_error

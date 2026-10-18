@@ -195,7 +195,7 @@ curl http://localhost:3000/v1/images/generations \
 
 实际可用模型以上游账号和 `/v1/models` 返回值为准。
 
-对话模型目录固定提供实测可用的 `gpt-6-luna`、`gpt-5.6-luna` 和 `auto`；旧设置不会覆盖这三个 ID。请求会将模型 ID 原样发送给上游，Luna 模型可由任意套餐类型的 Web 或 Codex 来源账号处理。
+对话模型目录固定提供实测可用的 `gpt-6-luna`、`gpt-5.6-luna` 和 `auto`；旧设置不会覆盖这三个 ID。请求会将模型 ID 原样发送给上游，文本对话和搜索会从任意套餐类型的 Web 来源账号中选择；Codex 来源账号不参与普通文本回复。
 
 ## 关键配置
 
