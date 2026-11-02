@@ -67,6 +67,8 @@ def _json_safe(value: Any) -> Any:
 
 def canonical_body(body: dict[str, Any], messages: list[dict[str, Any]], *, stream: bool) -> dict[str, Any]:
     payload = {key: body.get(key) for key in CACHEABLE_TEXT_KEYS if key in body}
+    from services.protocol.reasoning import thinking_effort_from_body
+    payload["effective_thinking_effort"] = thinking_effort_from_body(body)
     payload["messages"] = messages
     payload["stream"] = bool(stream)
     return payload

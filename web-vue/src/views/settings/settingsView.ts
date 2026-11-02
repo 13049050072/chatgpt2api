@@ -43,6 +43,7 @@ export const settingsTabs: SettingsSelectOption[] = [
 ]
 
 const settingsOptionLabels: Record<string, Record<string, string>> = {
+  default_thinking_effort: { auto: '自动', low: '低', medium: '中', high: '高', extended: '扩展' },
   image_upscale_engine: {
     sharp_lanczos3: 'Sharp / Lanczos3',
     pillow_lanczos: 'Pillow / Lanczos',

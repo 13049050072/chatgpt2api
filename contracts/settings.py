@@ -212,6 +212,8 @@ class ModelCatalogPatch(_ModelCatalogFields):
 class _SettingsEditableFields(_StrictModel):
     proxy_runtime: ProxyRuntimePatch = Field(default_factory=ProxyRuntimePatch)
     base_url: str = ""
+    default_image_upstream_model: str = Field(default="gpt-5-3", min_length=1, max_length=200)
+    default_thinking_effort: Literal["auto", "low", "medium", "high", "extended"] = "auto"
     refresh_account_interval_minute: int = _numeric_field("refresh_account_interval_minute")
     image_retention_hours: int = _numeric_field("image_retention_hours")
     log_retention_hours: int = _numeric_field("log_retention_hours")
@@ -240,6 +242,14 @@ class _SettingsEditableFields(_StrictModel):
     backup: BackupPatch = Field(default_factory=BackupPatch)
     third_party_apps: ThirdPartyAppsSettings = Field(default_factory=ThirdPartyAppsSettings)
     model_catalog: ModelCatalogPatch | None = None
+
+    @field_validator("default_image_upstream_model")
+    @classmethod
+    def validate_default_image_upstream_model(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("upstream model must not be blank or contain control characters")
+        return value
 
     @field_validator("model_catalog")
     @classmethod

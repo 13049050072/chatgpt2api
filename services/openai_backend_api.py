@@ -842,7 +842,7 @@ class OpenAIBackendAPI:
         if not base_model:
             return "auto"
         if base_model == "gpt-image-2":
-            return "gpt-5-3"
+            return str(config.get().get("default_image_upstream_model") or "gpt-5-3").strip() or "gpt-5-3"
         if base_model == CODEX_IMAGE_MODEL:
             return base_model
         return "auto"
@@ -1535,6 +1535,10 @@ class OpenAIBackendAPI:
             "paragen_cot_summary_display_override": "allow",
             "force_parallel_switch": "auto",
         }
+        if split_image_model(model)[1] == "gpt-image-2":
+            effort = normalize_thinking_effort(config.get().get("default_thinking_effort"))
+            if effort:
+                payload["thinking_effort"] = effort
         path = "/backend-api/f/conversation"
         timeout_secs = config.image_stream_timeout_secs
         # Keep the transport/curl deadline slightly above the logical SSE

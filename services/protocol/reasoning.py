@@ -22,4 +22,5 @@ def thinking_effort_from_body(body: dict[str, Any]) -> str:
     reasoning = body.get("reasoning")
     if isinstance(reasoning, dict):
         return normalize_thinking_effort(reasoning.get("effort"))
-    return ""
+    from services.config import config
+    return normalize_thinking_effort(config.get().get("default_thinking_effort"))

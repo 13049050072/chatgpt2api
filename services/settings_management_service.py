@@ -51,6 +51,8 @@ SETTINGS_SCHEMA_VERSION = 1
 _MANAGED_TOP_LEVEL_FIELDS = (
     "proxy_runtime",
     "base_url",
+    "default_image_upstream_model",
+    "default_thinking_effort",
     "refresh_account_interval_minute",
     "image_retention_hours",
     "log_retention_hours",
@@ -241,6 +243,8 @@ _FIELD_SPECS: dict[str, dict[str, Any]] = {
     "proxy_runtime.clearance.refresh_interval": _numeric_field_metadata("proxy_runtime.clearance.refresh_interval"),
     "proxy_runtime.clearance.warm_up_on_start": _field_metadata(False),
     "base_url": _field_metadata(""),
+    "default_image_upstream_model": _field_metadata("gpt-5-3"),
+    "default_thinking_effort": _field_metadata("auto", options=("auto", "low", "medium", "high", "extended")),
     "refresh_account_interval_minute": _numeric_field_metadata("refresh_account_interval_minute"),
     "image_retention_hours": _numeric_field_metadata("image_retention_hours"),
     "log_retention_hours": _numeric_field_metadata("log_retention_hours"),
@@ -487,6 +491,8 @@ class SettingsManagementService:
                 ),
             ),
             base_url=_url(effective.get("base_url")),
+            default_image_upstream_model=_text(effective.get("default_image_upstream_model"), "gpt-5-3") or "gpt-5-3",
+            default_thinking_effort=_enum(effective.get("default_thinking_effort"), "auto", {"auto", "low", "medium", "high", "extended"}),
             refresh_account_interval_minute=normalize_integer_setting(
                 "refresh_account_interval_minute",
                 effective.get("refresh_account_interval_minute"),

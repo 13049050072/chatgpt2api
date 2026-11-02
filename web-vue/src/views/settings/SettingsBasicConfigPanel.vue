@@ -53,6 +53,18 @@
 
     <FormSection title="请求与任务">
       <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <FormField label="官网生图上游模型">
+          <template #label-extra>
+            <HelpTip text="gpt-image-2 官网生图使用的上游模型，默认 gpt-5-3；不影响 Codex 生图或文本模型。" />
+          </template>
+          <Input v-model.trim="settings.default_image_upstream_model" :disabled="fieldReadOnly('default_image_upstream_model')" maxlength="200" block />
+        </FormField>
+        <FormField label="默认思考强度">
+          <template #label-extra>
+            <HelpTip text="用于未指定思考强度的 Chat Completions、Responses 文本请求及官网 gpt-image-2 生图；自动表示不指定。文本请求显式指定时优先使用请求值；搜索请求不受影响。" />
+          </template>
+          <GroupedSelectMenu v-model="settings.default_thinking_effort" :options="thinkingOptions" :disabled="fieldReadOnly('default_thinking_effort')" aria-label="默认思考强度" block />
+        </FormField>
         <FormField label="控制台请求超时">
           <template #label-extra>
             <HelpTip text="单位秒，控制日志、图片、账号和设置等控制台请求等待后端响应的最长时间。" />
@@ -98,10 +110,11 @@
 </template>
 
 <script setup lang="ts">
-import { FormField, FormSection, HelpTip, Input } from 'nanocat-ui'
+import { computed } from 'vue'
+import { FormField, FormSection, GroupedSelectMenu, HelpTip, Input } from 'nanocat-ui'
 import type { Settings } from '@/types/api'
 import SettingsNumberInput from '@/views/settings/SettingsNumberInput.vue'
-import { settingsFieldReadOnly, type SettingsFields } from '@/views/settings/settingsView'
+import { settingsFieldOptions, settingsFieldReadOnly, type SettingsFields } from '@/views/settings/settingsView'
 import type { NumberSettingField } from '@/views/settings/useNumberSettingField'
 
 const props = defineProps<{
@@ -120,4 +133,5 @@ const props = defineProps<{
 }>()
 
 const fieldReadOnly = (path: string) => settingsFieldReadOnly(props.fields, path)
+const thinkingOptions = computed(() => settingsFieldOptions(props.fields, 'default_thinking_effort', props.settings.default_thinking_effort))
 </script>

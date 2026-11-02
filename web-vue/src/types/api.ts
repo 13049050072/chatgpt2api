@@ -66,6 +66,8 @@ export interface SettingsGenBoxPush {
 export interface Settings {
   proxy_runtime: SettingsProxyRuntimeSettings
   base_url: string
+  default_image_upstream_model: string
+  default_thinking_effort: 'auto' | 'low' | 'medium' | 'high' | 'extended'
   refresh_account_interval_minute: number
   image_retention_hours: number
   log_retention_hours: number
