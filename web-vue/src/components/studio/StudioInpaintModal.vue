@@ -179,7 +179,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  submit: [payload: { prompt: string; markedImage: File }]
+  error: [message: string]
+  submit: [payload: { prompt: string; sourceImage: File; markedImage: File }]
 }>()
 
 const imageRef = ref<HTMLImageElement | null>(null)
@@ -471,7 +472,7 @@ function paintSelectionMarker(ctx: CanvasRenderingContext2D) {
   ctx.restore()
 }
 
-async function createMarkedImageFile() {
+async function createEditImageFiles() {
   const image = imageRef.value
   if (!image) throw new Error('原图未加载')
   const output = document.createElement('canvas')
@@ -480,17 +481,23 @@ async function createMarkedImageFile() {
   const ctx = output.getContext('2d')
   if (!ctx) throw new Error('浏览器不支持标记画布')
   ctx.drawImage(image, 0, 0, output.width, output.height)
+  const sourceBlob = await canvasBlob(output)
   paintSelectionMarker(ctx)
-  const blob = await canvasBlob(output)
-  return new File([blob], 'marked-edit-region.png', { type: 'image/png' })
+  const markedBlob = await canvasBlob(output)
+  return {
+    sourceImage: new File([sourceBlob], 'original-image.png', { type: 'image/png' }),
+    markedImage: new File([markedBlob], 'marked-edit-region.png', { type: 'image/png' }),
+  }
 }
 
 async function submit() {
   if (!canSubmit.value || submitting.value) return
   submitting.value = true
   try {
-    const markedImage = await createMarkedImageFile()
-    emit('submit', { prompt: prompt.value.trim(), markedImage })
+    const images = await createEditImageFiles()
+    emit('submit', { prompt: prompt.value.trim(), ...images })
+  } catch {
+    emit('error', '无法生成局部修改图片，请检查原图是否可访问后重试')
   } finally {
     submitting.value = false
   }

@@ -182,6 +182,7 @@
     />
     <StudioInpaintModal
       :source="inpaintTarget?.source || null"
+      @error="toast.error($event)"
       @close="closeInpaintModal"
       @submit="submitInpaintEdit"
     />
@@ -289,11 +290,7 @@ const isPromptPickerOpen = ref(false)
 const isSearchSkillOpen = ref(false)
 const isRecentFileTasksOpen = ref(false)
 const comparePreview = ref<StudioImageComparePreview | null>(null)
-const inpaintTarget = ref<{
-  asset: StudioImageAssetView
-  name: string
-  source: StudioImageCompareSource
-} | null>(null)
+const inpaintTarget = ref<{ source: StudioImageCompareSource } | null>(null)
 const messageListRef = ref<StudioMessageListScroller | null>(null)
 const studioContentRef = ref<HTMLElement | null>(null)
 const searchPanelMessageId = ref('')
@@ -694,7 +691,7 @@ function openInpaintModal(asset: StudioImageAssetView, name: string, _message: S
     toast.error('图片没有可用于局部修改的地址')
     return
   }
-  inpaintTarget.value = { asset, name, source }
+  inpaintTarget.value = { source }
 }
 
 function closeInpaintModal() {
@@ -710,15 +707,13 @@ function openImageCompare(source: StudioImageCompareSource, asset: StudioImageAs
   comparePreview.value = { before: source, after }
 }
 
-async function submitInpaintEdit(payload: { prompt: string; markedImage: File }) {
+async function submitInpaintEdit(payload: { prompt: string; sourceImage: File; markedImage: File }) {
   const target = inpaintTarget.value
   const prompt = cleanAssetText(payload.prompt)
   if (!target || !prompt) return
 
-  let sourceFile: File
   let referenceImage: StudioReferenceImage
   try {
-    sourceFile = await imageAssetToFile(target.asset, target.name)
     referenceImage = await messageReferenceImageFromFile(payload.markedImage)
   } catch (error) {
     toast.error(studioErrorMessage(error, '局部修改图片读取失败'))
@@ -733,7 +728,7 @@ async function submitInpaintEdit(payload: { prompt: string; markedImage: File })
   ].join('\n')
   const ok = await sendImageEditRequest({
     prompt: requestPrompt,
-    files: [sourceFile, payload.markedImage],
+    files: [payload.sourceImage, payload.markedImage],
     userContent: `局部修改：${prompt}`,
     referenceImages: [referenceImage],
     assistantContent: '局部修改任务已提交',
