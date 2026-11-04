@@ -86,6 +86,10 @@ TRACE_REQUEST_HEADERS = {
 }
 
 
+def attach_caller(payload: dict[str, object], identity: dict[str, object]) -> None:
+    payload["_caller_key_id"] = str(identity.get("id") or "")
+
+
 def attach_trace_headers(call: LoggedCall, request: Request) -> None:
     if not call._trace_image_perf():
         return
@@ -169,6 +173,7 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         payload["base_url"] = resolve_image_base_url(request)
+        attach_caller(payload, identity)
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
         image_chat = is_image_chat_request(payload)
@@ -190,6 +195,7 @@ def create_router() -> APIRouter:
     async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
+        attach_caller(payload, identity)
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("input"), payload.get("instructions"))
         image_response = has_response_image_generation_tool(payload)

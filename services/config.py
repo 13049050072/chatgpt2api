@@ -61,13 +61,13 @@ DEFAULT_GENBOX_PUSH = {
 }
 
 DEFAULT_CHAT_COMPLETION_CACHE = {
-    "enabled": True,
+    "enabled": False,
     "ttl_seconds": 60,
     "max_entries": 256,
     "dedupe_inflight": True,
     "stream_cache": True,
     "normalize_messages": True,
-    "drop_adjacent_duplicates": True,
+    "drop_adjacent_duplicates": False,
     "drop_assistant_history": False,
 }
 

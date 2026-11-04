@@ -406,8 +406,8 @@ class ImageStorageService:
         )
 
     def make_relative_path(self, image_data: bytes) -> str:
-        file_hash = hashlib.md5(image_data).hexdigest()
-        filename = f"{int(time.time())}_{file_hash}.png"
+        file_hash = hashlib.sha256(image_data).hexdigest()[:16]
+        filename = f"{time.time_ns()}_{uuid4().hex}_{file_hash}.png"
         now = beijing_now()
         relative_dir = Path(now.strftime("%Y"), now.strftime("%m"), now.strftime("%d"))
         return f"{relative_dir.as_posix()}/{filename}"

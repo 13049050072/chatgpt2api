@@ -834,6 +834,11 @@ class OpenAIBackendAPI:
         normalized_effort = normalize_thinking_effort(thinking_effort)
         if normalized_effort:
             payload["thinking_effort"] = normalized_effort
+        self.submitted_message_ids = tuple(
+            str(item.get("id") or "")
+            for item in payload["messages"]
+            if isinstance(item, dict) and item.get("id")
+        )
         return payload
 
     def _image_model_slug(self, model: str) -> str:
@@ -3776,16 +3781,30 @@ class OpenAIBackendAPI:
             system_hints: Optional[list[str]] = None,
             thinking_effort: str = "",
     ) -> Iterator[str]:
+        """Prepare the upstream payload before returning the SSE iterator.
+
+        ``submitted_message_ids`` has to be visible as soon as this method
+        returns. A generator would not run ``_conversation_payload`` until the
+        first iteration, which is after the caller has already copied the ids.
+        """
         system_hints = system_hints or []
+        self.submitted_message_ids = ()
         if "picture_v2" in system_hints:
-            yield from self._stream_picture_conversation(prompt, model, images or [])
-            return
+            return self._stream_picture_conversation(prompt, model, images or [])
 
         normalized = messages or [{"role": "user", "content": prompt}]
         self._bootstrap()
         requirements = self._get_chat_requirements()
         path, timezone = self._chat_target()
         payload = self._conversation_payload(normalized, model, timezone, thinking_effort=thinking_effort)
+        return self._stream_prepared_conversation(path, requirements, payload)
+
+    def _stream_prepared_conversation(
+            self,
+            path: str,
+            requirements: ChatRequirements,
+            payload: Dict[str, Any],
+    ) -> Iterator[str]:
         response = self.session.post(
             self.base_url + path,
             headers=self._conversation_headers(path, requirements),

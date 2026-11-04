@@ -385,6 +385,25 @@ def message_text(content: Any) -> str:
     return ""
 
 
+def _tool_transcript(message: dict[str, Any]) -> str:
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list):
+        return ""
+    lines: list[str] = []
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = str(function.get("name") or call.get("name") or "tool").strip() or "tool"
+        arguments = function.get("arguments", call.get("arguments"))
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False) if arguments not in (None, "") else ""
+        call_id = str(call.get("id") or "").strip()
+        label = f"[tool_call {call_id} {name}]".strip()
+        lines.append(f"{label} {arguments}".strip())
+    return "\n".join(lines)
+
+
 def normalize_messages(messages: object, system: Any = None) -> list[dict[str, Any]]:
     normalized = []
     if config.global_system_prompt:
@@ -396,9 +415,17 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
         for message in messages:
             if not isinstance(message, dict):
                 continue
-            role = message.get("role", "user")
+            role = str(message.get("role") or "user")
             content = message.get("content", "")
             text = message_text(content)
+            tool_text = _tool_transcript(message)
+            if role == "tool":
+                tool_call_id = str(message.get("tool_call_id") or "").strip()
+                marker = f"[tool_result {tool_call_id}]" if tool_call_id else "[tool_result]"
+                text = f"{marker} {text}".strip()
+                role = "user"
+            if tool_text:
+                text = f"{text}\n{tool_text}".strip() if text else tool_text
             images: list[tuple[bytes, str]] = []
             if role == "user":
                 images.extend(extract_image_from_message_content(content))
@@ -668,11 +695,10 @@ def is_image_generation_arguments(
 
 
 def strip_history(text: str, history_text: str = "") -> str:
-    text = str(text or "")
-    history_text = str(history_text or "")
-    while history_text and text.startswith(history_text):
-        text = text[len(history_text):]
-    return text
+    # A new answer may legitimately start with the previous assistant text.
+    # Replayed input messages are skipped by id; this no longer deletes prefixes.
+    del history_text
+    return str(text or "")
 
 
 def sanitize_output_text(text: str) -> str:
@@ -999,16 +1025,28 @@ def conversation_base_event(event_type: str, state: ConversationState, **extra: 
     }
 
 
+def _is_live_text_patch(event: dict[str, Any]) -> bool:
+    if event.get("p") or str(event.get("o") or "") in {"append", "patch", "replace", "add"}:
+        return True
+    value = event.get("v")
+    has_message = isinstance(event.get("message"), dict) or (
+        isinstance(value, dict) and isinstance(value.get("message"), dict)
+    )
+    return isinstance(value, (str, list)) and not has_message
+
+
 def iter_conversation_payloads(
         payloads: Iterator[str],
         history_text: str = "",
         history_messages: list[str] | None = None,
         *,
         classify_terminal_text_as_image_failure: bool = True,
+        submitted_message_ids: Iterable[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     state = ConversationState()
     history_messages = history_messages or []
     history_index = 0
+    submitted_ids = {str(item).strip() for item in submitted_message_ids or () if str(item).strip()}
     for payload in payloads:
         # print(f"[upstream_sse] {payload}", flush=True)
         if not payload:
@@ -1033,10 +1071,23 @@ def iter_conversation_payloads(
             next_raw_text,
             classify_terminal_text_as_image_failure=classify_terminal_text_as_image_failure,
         )
-        if history_index < len(history_messages) and event_assistant_text(event, history_text) == history_messages[history_index]:
-            history_index += 1
-            state.raw_text = ""
-            state.text = ""
+        replay_text = event_assistant_text(event, history_text)
+        message_id = str(extract_message_facts(event).get("message_id") or "").strip()
+        replayed_input = bool(message_id and message_id in submitted_ids)
+        replayed_snapshot = (
+            not message_id
+            and not _is_live_text_patch(event)
+            and history_index < len(history_messages)
+            and replay_text == history_messages[history_index]
+        )
+        if replayed_input or replayed_snapshot:
+            if history_index < len(history_messages) and replay_text == history_messages[history_index]:
+                history_index += 1
+            # A replay can arrive after the new answer has started. Clearing
+            # here would discard that partial text.
+            if not state.text:
+                state.raw_text = ""
+                state.text = ""
             continue
         next_text = sanitize_output_text(next_raw_text)
         state.raw_text = next_raw_text
@@ -1086,6 +1137,7 @@ def conversation_events(
         history_text,
         history_messages,
         classify_terminal_text_as_image_failure=image_model,
+        submitted_message_ids=getattr(backend, "submitted_message_ids", ()),
     )
 
 

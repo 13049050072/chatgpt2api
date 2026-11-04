@@ -69,6 +69,7 @@ def canonical_body(body: dict[str, Any], messages: list[dict[str, Any]], *, stre
     payload = {key: body.get(key) for key in CACHEABLE_TEXT_KEYS if key in body}
     from services.protocol.reasoning import thinking_effort_from_body
     payload["effective_thinking_effort"] = thinking_effort_from_body(body)
+    payload["caller_key_id"] = str(body.get("_caller_key_id") or "")
     payload["messages"] = messages
     payload["stream"] = bool(stream)
     return payload
@@ -179,7 +180,7 @@ class ChatCompletionCache:
             with self._lock:
                 self._inflight.pop(key, None)
             with inflight.condition:
-                inflight.error = exc
+                inflight.error = exc if not isinstance(exc, GeneratorExit) else RuntimeError("response cancelled")
                 inflight.done = True
                 inflight.condition.notify_all()
             raise
@@ -208,20 +209,24 @@ class ChatCompletionCache:
 
         now = time.time()
         max_entries = int(settings.get("max_entries") or 1)
+        cached_chunks: list[dict[str, Any]] | None = None
         with self._lock:
             self._prune_locked(now, max_entries)
             entry = self._entries.get(key)
             if entry and entry.expires_at > now:
-                yield from self._copy(entry.value)
-                return
-            inflight = self._inflight.get(key) if settings.get("dedupe_inflight") else None
-            if inflight is None:
-                inflight = InflightCall()
-                if settings.get("dedupe_inflight"):
-                    self._inflight[key] = inflight
-                owner = True
+                cached_chunks = self._copy(entry.value)
             else:
-                owner = False
+                inflight = self._inflight.get(key) if settings.get("dedupe_inflight") else None
+                if inflight is None:
+                    inflight = InflightCall()
+                    if settings.get("dedupe_inflight"):
+                        self._inflight[key] = inflight
+                    owner = True
+                else:
+                    owner = False
+        if cached_chunks is not None:
+            yield from cached_chunks
+            return
 
         if not owner:
             with inflight.condition:
@@ -241,7 +246,7 @@ class ChatCompletionCache:
             with self._lock:
                 self._inflight.pop(key, None)
             with inflight.condition:
-                inflight.error = exc
+                inflight.error = exc if not isinstance(exc, GeneratorExit) else RuntimeError("stream cancelled")
                 inflight.done = True
                 inflight.condition.notify_all()
             raise

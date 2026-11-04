@@ -17,6 +17,8 @@ from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
+from services.proxy_service import proxy_settings
+
 ImageInput = tuple[bytes, str, str]
 ImageSource = str | UploadFile | ImageInput
 
@@ -227,7 +229,12 @@ def _safe_filename(name: str, mime_type: str, fallback: str) -> str:
     return cleaned
 
 
-def _decode_data_url(url: str) -> ImageInput:
+def _image_size_error(limit: int) -> str:
+    megabytes = max(1, limit // (1024 * 1024))
+    return f"image URL exceeds {megabytes}MB limit"
+
+
+def _decode_data_url(url: str, *, max_bytes: int = MAX_IMAGE_REFERENCE_BYTES) -> ImageInput:
     """解码 data URL：把内联图片转成标准图片输入元组。"""
     header, separator, payload = url.partition(",")
     if not separator:
@@ -235,16 +242,16 @@ def _decode_data_url(url: str) -> ImageInput:
     mime_type = header.split(";", 1)[0].removeprefix("data:") or "image/png"
     if not mime_type.startswith("image/"):
         raise HTTPException(status_code=400, detail={"error": "image_url must point to an image"})
-    if len(payload) > MAX_IMAGE_REFERENCE_BYTES * 2:
-        raise HTTPException(status_code=400, detail={"error": "image URL exceeds 50MB limit"})
+    if len(payload) > max_bytes * 2:
+        raise HTTPException(status_code=400, detail={"error": _image_size_error(max_bytes)})
     try:
         data = base64.b64decode(payload, validate=True) if ";base64" in header else unquote_to_bytes(payload)
     except (binascii.Error, ValueError) as exc:
         raise HTTPException(status_code=400, detail={"error": "invalid data image URL"}) from exc
     if not data:
         raise HTTPException(status_code=400, detail={"error": "image URL is empty"})
-    if len(data) > MAX_IMAGE_REFERENCE_BYTES:
-        raise HTTPException(status_code=400, detail={"error": "image URL exceeds 50MB limit"})
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=400, detail={"error": _image_size_error(max_bytes)})
     return data, f"image_url.{_extension_from_mime(mime_type)}", mime_type
 
 
@@ -328,7 +335,7 @@ def _image_fetch_curl_options(parsed: ParseResult, addresses: tuple[str, ...]) -
     return options
 
 
-def _read_response_limited(response: requests.Response) -> bytes:
+def _read_response_limited(response: requests.Response, *, max_bytes: int = MAX_IMAGE_REFERENCE_BYTES) -> bytes:
     """Read a response without allowing an unbounded body allocation."""
     data = bytearray()
     total = 0
@@ -341,8 +348,8 @@ def _read_response_limited(response: requests.Response) -> bytes:
                         continue
                     chunk_bytes = bytes(chunk)
                     total += len(chunk_bytes)
-                    if total > MAX_IMAGE_REFERENCE_BYTES:
-                        raise HTTPException(status_code=400, detail={"error": "image URL exceeds 50MB limit"})
+                    if total > max_bytes:
+                        raise HTTPException(status_code=400, detail={"error": _image_size_error(max_bytes)})
                     data.extend(chunk_bytes)
             except TypeError:
                 # Lightweight response doubles often expose ``content`` but
@@ -352,12 +359,12 @@ def _read_response_limited(response: requests.Response) -> bytes:
                 # Preserve compatibility with eager response implementations
                 # that return no chunks even though ``content`` is populated.
                 data = bytearray(bytes(response.content))
-            if len(data) > MAX_IMAGE_REFERENCE_BYTES:
-                raise HTTPException(status_code=400, detail={"error": "image URL exceeds 50MB limit"})
+            if len(data) > max_bytes:
+                raise HTTPException(status_code=400, detail={"error": _image_size_error(max_bytes)})
         else:
             data = bytes(response.content)
-            if len(data) > MAX_IMAGE_REFERENCE_BYTES:
-                raise HTTPException(status_code=400, detail={"error": "image URL exceeds 50MB limit"})
+            if len(data) > max_bytes:
+                raise HTTPException(status_code=400, detail={"error": _image_size_error(max_bytes)})
             return data
     except HTTPException:
         raise
@@ -366,11 +373,16 @@ def _read_response_limited(response: requests.Response) -> bytes:
     return bytes(data)
 
 
-def _download_image_url(url: str) -> ImageInput:
+def _download_image_url(
+        url: str,
+        *,
+        max_bytes: int = MAX_IMAGE_REFERENCE_BYTES,
+        use_egress_proxy: bool = False,
+) -> ImageInput:
     """下载远程图片：把 http/https 图片链接转成标准图片输入元组。"""
     source = _clean(url)
     if source.startswith("data:"):
-        return _decode_data_url(source)
+        return _decode_data_url(source, max_bytes=max_bytes)
     current = source
     for redirect_count in range(MAX_IMAGE_REDIRECTS + 1):
         parsed, addresses = _validate_public_image_url(current)
@@ -379,14 +391,20 @@ def _download_image_url(url: str) -> ImageInput:
             acquired = _IMAGE_FETCH_SLOTS.acquire(timeout=60)
             if not acquired:
                 raise TimeoutError("image fetch concurrency limit reached")
-            response = requests.get(
-                current,
-                headers={"Accept": "image/*,*/*;q=0.8", "User-Agent": "chatgpt2api image fetcher"},
-                timeout=60,
-                allow_redirects=False,
-                stream=True,
-                curl_options=_image_fetch_curl_options(parsed, addresses),
-            )
+            request_kwargs: dict[str, object] = {
+                "headers": {"Accept": "image/*,*/*;q=0.8", "User-Agent": "chatgpt2api image fetcher"},
+                "timeout": 60,
+                "allow_redirects": False,
+                "stream": True,
+            }
+            egress = proxy_settings.build_session_kwargs() if use_egress_proxy else {}
+            if egress.get("proxy"):
+                # The proxy opens the public URL. Keep redirect checks, but do
+                # not pin DNS or disable the proxy.
+                request_kwargs.update(egress)
+            else:
+                request_kwargs["curl_options"] = _image_fetch_curl_options(parsed, addresses)
+            response = requests.get(current, **request_kwargs)
         except HTTPException:
             if acquired:
                 _IMAGE_FETCH_SLOTS.release()
@@ -407,9 +425,9 @@ def _download_image_url(url: str) -> ImageInput:
             if not 200 <= response.status_code < 300:
                 raise HTTPException(status_code=400, detail={"error": f"image_url fetch failed: HTTP {response.status_code}"})
             content_length = _clean(response.headers.get("content-length"))
-            if content_length and content_length.isdigit() and int(content_length) > MAX_IMAGE_REFERENCE_BYTES:
-                raise HTTPException(status_code=400, detail={"error": "image_url exceeds 50MB limit"})
-            data = _read_response_limited(response)
+            if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+                raise HTTPException(status_code=400, detail={"error": _image_size_error(max_bytes)})
+            data = _read_response_limited(response, max_bytes=max_bytes)
             if not data:
                 raise HTTPException(status_code=400, detail={"error": "image_url returned empty content"})
             mime_type = _response_mime_type(response, parsed.path)

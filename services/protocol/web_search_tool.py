@@ -65,14 +65,21 @@ def message_text(value: object) -> str:
     return ""
 
 
+_MAX_SEARCH_QUERY_CHARS = 4000
+
+
 def search_query_from_messages(messages: list[dict[str, Any]]) -> str:
-    for message in reversed(messages):
+    parts: list[str] = []
+    for message in messages:
         if str(message.get("role") or "").strip().lower() != "user":
             continue
         text = message_text(message.get("content"))
         if text:
-            return text
-    return ""
+            parts.append(text)
+    query = "\n".join(parts).strip()
+    if len(query) <= _MAX_SEARCH_QUERY_CHARS:
+        return query
+    return query[-_MAX_SEARCH_QUERY_CHARS:]
 
 
 def _readable_annotation_part(parts: list[str]) -> str:
