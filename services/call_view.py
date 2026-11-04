@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from services.image_failure import (
+    IMAGE_TOOL_ERROR_PUBLIC_MESSAGE,
     is_rate_limit_failure_code,
     is_structured_failure,
     is_text_review_failure_code,
@@ -80,6 +81,20 @@ def _clean(value: object) -> str:
 
 def _image_failure_label(value: object) -> str:
     return _IMAGE_FAILURE_LABELS.get(_clean(value).lower(), "")
+
+
+def _displayed_public_error(item: Mapping[str, Any], business: str, error_code: str) -> str:
+    """Hide the image-tool sentence that older text failures stored by mistake."""
+    public_error = _first_text(item, ("public_error", "error"))
+    if (
+        business not in {"image_generation", "image_edit", "image_chat"}
+        and public_error == IMAGE_TOOL_ERROR_PUBLIC_MESSAGE
+    ):
+        stored_error = _clean(_value(item, "error"))
+        if stored_error and stored_error != IMAGE_TOOL_ERROR_PUBLIC_MESSAGE:
+            return stored_error
+        return _image_failure_label(error_code) or public_error
+    return public_error
 
 
 def _normalize_account_status(value: object) -> str:
@@ -735,7 +750,8 @@ def build_call_summary(item: Mapping[str, Any], *, error_limit: int = _SUMMARY_E
     display_status = _clean(_value(item, "status"))
     if business == "account":
         display_status = _normalize_account_status(display_status)
-    public_error = _first_text(item, ("public_error", "error"))
+    error_code = _clean(_value(item, "error_code", _value(item, "failure_code")))
+    public_error = _displayed_public_error(item, business, error_code)
     if error_limit > 0 and len(public_error) > error_limit:
         public_error = f"{public_error[:error_limit]}..."
     image_urls = call_image_urls(item)
@@ -758,7 +774,7 @@ def build_call_summary(item: Mapping[str, Any], *, error_limit: int = _SUMMARY_E
         "account_email": _clean(_value(item, "account_email")),
         "conversation_id": _clean(_value(item, "conversation_id")),
         "status_code": _int(_value(item, "status_code")),
-        "error_code": _clean(_value(item, "error_code", _value(item, "failure_code"))),
+        "error_code": error_code,
         "public_error": public_error,
         "image_requested_count": requested,
         "image_succeeded_count": succeeded,

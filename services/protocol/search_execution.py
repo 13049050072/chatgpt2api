@@ -59,7 +59,7 @@ def execute_search(
         if not access_token or access_token in attempted_tokens:
             if last_auth_error is not None:
                 raise last_auth_error
-            raise RuntimeError("no available text account")
+            raise RuntimeError("没有可用的 Web 文本账号。请确认至少有一个来源为 Web、状态正常且 Access Token 仍有效的账号。")
         attempted_tokens.add(access_token)
         account = _account_snapshot(access_token)
 

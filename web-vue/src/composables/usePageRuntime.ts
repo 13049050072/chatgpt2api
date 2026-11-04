@@ -54,9 +54,12 @@ export function usePageRuntime(_name: string) {
     return next
   }
 
-  function isLatestRequest(key: string, seq: number, options: { requireVisible?: boolean } = {}) {
+  function isLatestRequest(key: string, seq: number, _options: { requireVisible?: boolean } = {}) {
     if (!isActive.value) return false
-    if (options.requireVisible !== false && !isVisible.value) return false
+    // A hidden tab still owns the request it already started. Hiding the
+    // document invalidates the sequence, which is what drops stale results.
+    // Treating hidden itself as stale left the loading flag on forever when
+    // the response arrived before the tab became visible.
     return requestSeq.get(key) === seq
   }
 

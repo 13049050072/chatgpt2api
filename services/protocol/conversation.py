@@ -1157,7 +1157,7 @@ def _remember_text_account(backend: OpenAIBackendAPI, access_token: str) -> str:
 def text_backend() -> OpenAIBackendAPI:
     access_token = account_service.get_text_access_token(source_type="web")
     if not access_token:
-        raise RuntimeError("no available Web text account")
+        raise RuntimeError("没有可用的 Web 文本账号。请确认至少有一个来源为 Web、状态正常且 Access Token 仍有效的账号。")
     backend = OpenAIBackendAPI(access_token=access_token)
     _remember_text_account(backend, access_token)
     return backend
@@ -1170,7 +1170,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
     auth_failures = 0
     while True:
         if token and token in attempted_tokens:
-            raise RuntimeError("no available text account")
+            raise RuntimeError("没有可用的 Web 文本账号。请确认至少有一个来源为 Web、状态正常且 Access Token 仍有效的账号。")
         if token:
             attempted_tokens.add(token)
         account_snapshot = account_service.get_account(token) or {}

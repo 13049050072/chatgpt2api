@@ -424,7 +424,11 @@ function isStandaloneErrorMessage(message: StudioMessageView) {
 }
 
 function standaloneErrorText(message: StudioMessageView) {
-  return textValue(message.error) || textValue(message.content) || '请求失败，请稍后重试。'
+  const text = textValue(message.error) || textValue(message.content)
+  if (text === 'no available Web text account' || text === 'no available text account') {
+    return '没有可用的 Web 文本账号。请确认至少有一个来源为 Web、状态正常且 Access Token 仍有效的账号。'
+  }
+  return text || '请求失败，请稍后重试。'
 }
 
 function isCodeMessage(message: StudioMessageView) {

@@ -407,15 +407,18 @@ def _exception_log_fields(exc: Exception, *, image: bool = False) -> dict[str, o
     if attempts:
         fields["image_attempts"] = attempts
     failure = getattr(exc, "failure", None)
-    if image or failure is not None:
-        failure = _final_image_failure(exc)
-        fields.update(failure.diagnostic_fields())
-        fields["error_code"] = failure.code
-        fields["public_error"] = _public_image_exception_message(exc, failure)
-        if failure.code == "image_poll_timeout":
-            fields.pop("raw_error", None)
-        elif "raw_error" not in fields and not hasattr(exc, "raw_error"):
-            fields["raw_error"] = diagnostic_excerpt(str(exc), 4000)
+    if image or isinstance(failure, ImageFailure):
+        resolved = _final_image_failure(exc) if image else failure
+        fields.update(resolved.diagnostic_fields())
+        fields["error_code"] = resolved.code
+        if image:
+            fields["public_error"] = _public_image_exception_message(exc, resolved)
+            if resolved.code == "image_poll_timeout":
+                fields.pop("raw_error", None)
+            elif "raw_error" not in fields and not hasattr(exc, "raw_error"):
+                fields["raw_error"] = diagnostic_excerpt(str(exc), 4000)
+        else:
+            fields.pop("public_error", None)
     return fields
 
 

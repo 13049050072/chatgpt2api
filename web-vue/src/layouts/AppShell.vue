@@ -1454,8 +1454,20 @@ function handleNavClick(path: string) {
   closeSidebar()
 }
 
+function dismissPortaledMenus() {
+  document.dispatchEvent(new PointerEvent('pointerdown', {
+    bubbles: true,
+    cancelable: true,
+    pointerId: 1,
+    pointerType: 'mouse',
+  }))
+}
+
 const removeRouteBeforeGuard = router.beforeEach((to, from) => {
-  if (to.fullPath !== from.fullPath) beginRouteNavigation(to.path)
+  if (to.fullPath !== from.fullPath) {
+    dismissPortaledMenus()
+    beginRouteNavigation(to.path)
+  }
 })
 const removeRouteAfterHook = router.afterEach((to) => {
   void nextTick(() => finishRouteNavigation(to.path))
