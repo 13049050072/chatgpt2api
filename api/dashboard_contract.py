@@ -61,6 +61,10 @@ class DashboardAccountView(BaseModel):
     abnormal: int = 0
     disabled: int = 0
     total_quota: int = 0
+    idle_image_accounts: int = 0
+    idle_upload_accounts: int = 0
+    next_restore_at: str | None = None
+    restore_within_24h: int = 0
     unlimited_quota_count: int = 0
     unknown_quota_count: int = 0
     total_success: int = 0

@@ -366,10 +366,13 @@ class RetentionCleanupCoordinator:
         if stop_event is None or not stop_event.is_set():
             try:
                 result["images"] = self._image_runner(config.image_retention_hours, False)
-                if enforce_image_free_space and (stop_event is None or not stop_event.is_set()):
-                    result["image_space"] = self._image_space_runner()
             except Exception as exc:
                 result["errors"]["images"] = str(exc)
+        if enforce_image_free_space and (stop_event is None or not stop_event.is_set()):
+            try:
+                result["image_space"] = self._image_space_runner()
+            except Exception as exc:
+                result["errors"]["image_space"] = str(exc)
         status_results = {"logs": result.get("logs"), "images": result.get("images")}
         image_space = result.get("image_space")
         if isinstance(image_space, dict) and isinstance(image_space.get("cleanup"), dict):
@@ -378,9 +381,14 @@ class RetentionCleanupCoordinator:
                 image_space["cleanup"].get("removed") or 0
             )
             status_results["images"] = image_result
+        status_errors = dict(result["errors"])
+        if status_errors.get("image_space"):
+            status_errors["images"] = "; ".join(
+                filter(None, (status_errors.get("images"), status_errors["image_space"]))
+            )
         self._mark_finished(
             results=status_results,
-            errors=result["errors"],
+            errors=status_errors,
             domains=("logs", "images"),
         )
         return result
@@ -458,6 +466,8 @@ class RetentionCleanupCoordinator:
                     logger.error({"event": "log_auto_cleanup_failed", "error": errors["logs"]})
                 if errors.get("images"):
                     logger.error({"event": "image_auto_cleanup_failed", "error": errors["images"]})
+                if errors.get("image_space"):
+                    logger.error({"event": "image_space_cleanup_failed", "error": errors["image_space"]})
                 next_epoch = self._schedule_after_cleanup(wake_revision)
                 deadline = time.monotonic() + max(0.0, next_epoch - time.time())
         finally:

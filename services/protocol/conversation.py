@@ -51,6 +51,7 @@ from utils.helper import (
     is_supported_image_model,
     split_image_model,
 )
+from utils.animation import prepare_gif, prompt_prefix
 from utils.image_tokens import count_image_content_tokens, image_output_metadata, image_size_from_bytes
 from utils.log import logger
 from utils.diagnostics import diagnostic_excerpt
@@ -517,6 +518,9 @@ def format_image_result(
     message: str = "",
     requested_size: str | None = None,
     deadline_monotonic: float | None = None,
+    animation: bool = False,
+    frame_count: int | None = None,
+    frame_duration_ms: int | None = None,
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     image_urls: list[str] = []
@@ -526,6 +530,10 @@ def format_image_result(
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
         image_bytes = base64.b64decode(b64_json)
+        if animation:
+            image_bytes = prepare_gif(image_bytes, frame_count, frame_duration_ms)
+            if image_bytes is None:
+                continue
         image_bytes = upscale_image_if_needed(image_bytes, requested_size)
         stored_url = save_image_bytes(
             image_bytes,
@@ -535,6 +543,8 @@ def format_image_result(
         if stored_url:
             image_urls.append(stored_url)
         asset: dict[str, Any] = {"revised_prompt": revised_prompt}
+        if animation:
+            asset.update({"format": "gif", "is_animation": True})
         if response_format == "b64_json":
             asset["b64_json"] = base64.b64encode(image_bytes).decode("ascii")
         else:
@@ -562,6 +572,9 @@ class ConversationRequest:
     size: str | None = None
     quality: str = "auto"
     response_format: str = "b64_json"
+    animation: bool = False
+    frame_count: int | None = None
+    frame_duration_ms: int | None = None
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
@@ -1690,6 +1703,9 @@ def _image_result_output_from_urls(
         int(time.time()),
         requested_size=request.size,
         deadline_monotonic=request.deadline_monotonic or None,
+        animation=request.animation,
+        frame_count=request.frame_count,
+        frame_duration_ms=request.frame_duration_ms,
     )
     data = formatted["data"]
     if not data:
@@ -1722,7 +1738,7 @@ def stream_image_outputs(
     try:
         for event in conversation_events(
                 backend,
-                prompt=request.prompt,
+                prompt=(f"{prompt_prefix(request.frame_count, request.frame_duration_ms)}\n{request.prompt}" if request.animation else request.prompt),
                 model=request.model,
                 images=request.images or [],
                 size=request.size,
@@ -2077,6 +2093,9 @@ def stream_codex_image_outputs(
         int(time.time()),
         requested_size=request.size,
         deadline_monotonic=request.deadline_monotonic or None,
+        animation=request.animation,
+        frame_count=request.frame_count,
+        frame_duration_ms=request.frame_duration_ms,
     )
     data = formatted["data"]
     if data:
@@ -2183,6 +2202,7 @@ def _generate_single_image(
                     plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
                     excluded_tokens=attempted_tokens,
                     deadline_monotonic=request.deadline_monotonic or None,
+                    **({"needs_upload": True} if request.images and not codex_model else {}),
                 )
                 attempted_tokens.add(token)
                 account_attempt_started = account_wait_started
@@ -2990,6 +3010,8 @@ def stream_image_chunks(
                 if not b64_json:
                     continue
                 completed: dict[str, Any] = {"b64_json": b64_json}
+                if item.get("is_animation"):
+                    completed.update({"format": "gif", "is_animation": True})
                 if usage_builder:
                     usage = usage_builder([item])
                     if usage:

@@ -323,6 +323,10 @@ export interface DashboardAccountStats {
   abnormal: number
   disabled: number
   total_quota: number
+  idle_image_accounts: number
+  idle_upload_accounts: number
+  next_restore_at: string | null
+  restore_within_24h: number
   unlimited_quota_count: number
   unknown_quota_count: number
   total_success: number

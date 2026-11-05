@@ -223,8 +223,9 @@ function validateAccounts(value: unknown) {
   const accounts = expectObject(value, 'response.accounts')
   ;[
     'total', 'cumulative_total', 'active', 'limited', 'abnormal', 'disabled',
-    'total_quota', 'unlimited_quota_count', 'unknown_quota_count', 'total_success', 'total_fail',
+    'total_quota', 'idle_image_accounts', 'idle_upload_accounts', 'restore_within_24h', 'unlimited_quota_count', 'unknown_quota_count', 'total_success', 'total_fail',
   ].forEach((field) => expectNumber(accounts[field], `response.accounts.${field}`, true))
+  if (accounts.next_restore_at !== null) expectString(accounts.next_restore_at, 'response.accounts.next_restore_at')
   expectCountRecord(accounts.by_type, 'response.accounts.by_type')
   expectBoolean(accounts.healthy, 'response.accounts.healthy')
 }

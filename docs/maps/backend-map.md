@@ -32,12 +32,13 @@ Conversation endpoint. Codex source accounts are not selected for ordinary text
 replies. Chat model discovery and editing are not exposed in Settings.
 
 `utils.helper.WEB_IMAGE_MODELS` owns the built-in Web image identifiers:
-`gpt-image-2`, `gpt-image-2.5`, `gpt-image-2.5-flare`, and
-`gpt-image-2.5-sunburst`. Model validation and `ModelCatalogService` consume this
+`gpt-image-2`, `gpt-image-2.5`, `gpt-image-2.5-flare`,
+`gpt-image-2.5-sunburst`, `gpt-image-2.6-flare`, and
+`gpt-image-2.6-sunburst`. Model validation and `ModelCatalogService` consume this
 list; Studio consumes the backend catalog. Explicit catalog configuration still
 takes precedence over the built-in list. No `exact` aliases are added.
 
-The 2.5 identifiers use the existing `auto` upstream Web model slug. They are
+The 2.5 and 2.6 identifiers use the existing `auto` upstream Web model slug. They are
 compatibility names and do not force a particular official API image engine or
 quality entitlement. Existing `gpt-image-2` and Codex routing and the default
 image model remain unchanged.

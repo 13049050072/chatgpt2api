@@ -9,9 +9,10 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+import anyio
 from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from services.call_record_service import CallRecordService
 from services.storage.call_record_repository import CallRecordCursorMismatch
@@ -25,6 +26,7 @@ from services.image_failure import (
 )
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from services.realtime_monitor_service import realtime_monitor_service
+from services.runtime_configuration import env_int
 from utils.diagnostics import (
     diagnostic_excerpt,
     exception_diagnostic_fields,
@@ -463,6 +465,80 @@ def _protocol_error_response(exc: Exception, status_code: int, sse: str) -> JSON
     return openai_error_response(message, status_code)
 
 
+# Image work uses its own AnyIO capacity budget so long upstream calls do not
+# consume the default limiter used by control-panel requests.
+_image_thread_limiter = anyio.CapacityLimiter(
+    env_int("CHATGPT2API_IMAGE_THREAD_TOKENS", 32, maximum=512)
+)
+
+
+_image_request_limit = env_int("CHATGPT2API_IMAGE_REQUEST_LIMIT", 128, maximum=4096)
+_image_request_lock = threading.Lock()
+_image_request_count = 0
+
+
+def _acquire_image_request() -> bool:
+    global _image_request_count
+    with _image_request_lock:
+        if _image_request_count >= _image_request_limit:
+            return False
+        _image_request_count += 1
+        return True
+
+
+def _release_image_request() -> None:
+    global _image_request_count
+    with _image_request_lock:
+        _image_request_count -= 1
+
+
+class _AdmittedStreamingResponse(Response):
+    """Hold admission until the wrapped ASGI response exits, including disconnects."""
+    def __init__(self, response: StreamingResponse):
+        self.response = response
+        self.status_code = response.status_code
+        self.raw_headers = response.raw_headers
+        self.background = response.background
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await self.response(scope, receive, send)
+        finally:
+            try:
+                close = getattr(self.response.body_iterator, "aclose", None)
+                if close is not None:
+                    with anyio.CancelScope(shield=True):
+                        await close()
+            finally:
+                _release_image_request()
+
+
+async def _run_image_sync(fn, *args):
+    return await anyio.to_thread.run_sync(fn, *args, limiter=_image_thread_limiter)
+
+
+async def _image_stream_async(items, sender, source):
+    logged_items = items
+    encoded_items = sender(logged_items)
+    try:
+        while True:
+            has_item, chunk = await _run_image_sync(_next_item, encoded_items)
+            if not has_item:
+                return
+            yield chunk
+    finally:
+        # A cancelled client must still close the underlying image generator so
+        # its account slots and upstream connections are released.
+        with anyio.CancelScope(shield=True):
+            for iterator in (encoded_items, logged_items, source):
+                close = getattr(iterator, "close", None)
+                if close is not None:
+                    try:
+                        await _run_image_sync(close)
+                    except Exception as exc:
+                        logger.warning({"event": "image_stream_close_failed", "error": diagnostic_excerpt(exc, 500)})
+
+
 def _next_item(items):
     try:
         return True, next(items)
@@ -485,6 +561,24 @@ class LoggedCall:
     trace_metadata: dict[str, object] = field(default_factory=dict)
 
     async def run(self, handler, *args, sse: str = "openai"):
+        if not self._is_image_request():
+            return await self._run(handler, *args, sse=sse)
+        if not _acquire_image_request():
+            self.log("调用失败", status="failed", error="Image request capacity is full.")
+            return openai_error_response({"error": {"message": "Image request capacity is full. Please retry later.", "type": "rate_limit_error", "code": "image_request_queue_full"}}, 429)
+        transferred = False
+        try:
+            result = await self._run(handler, *args, sse=sse)
+            if isinstance(result, StreamingResponse):
+                wrapped = _AdmittedStreamingResponse(result)
+                transferred = True
+                return wrapped
+            return result
+        finally:
+            if not transferred:
+                _release_image_request()
+
+    async def _run(self, handler, *args, sse: str = "openai"):
         if args and isinstance(args[0], dict):
             self.attach_trace_metadata(args[0])
         image_request = self._is_image_request()
@@ -527,7 +621,7 @@ class LoggedCall:
                     self.perf_timings["handler_exec_ms"] = int((time.perf_counter() - handler_started) * 1000)
 
         try:
-            result = await run_in_threadpool(_call_handler)
+            result = await (_run_image_sync(_call_handler) if image_request else run_in_threadpool(_call_handler))
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=_public_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""),
@@ -602,7 +696,7 @@ class LoggedCall:
                     self.perf_timings["stream_first_exec_ms"] = int((time.perf_counter() - first_item_started) * 1000)
 
         try:
-            has_first, first = await run_in_threadpool(_next_item_with_timing)
+            has_first, first = await (_run_image_sync(_next_item_with_timing) if image_request else run_in_threadpool(_next_item_with_timing))
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=_public_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""),
@@ -622,7 +716,10 @@ class LoggedCall:
         if not has_first:
             self.log("流式调用结束")
             return StreamingResponse(sender(()), media_type="text/event-stream")
-        return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
+        items = self.stream(itertools.chain([first], result))
+        if image_request:
+            return StreamingResponse(_image_stream_async(items, sender, result), media_type="text/event-stream")
+        return StreamingResponse(sender(items), media_type="text/event-stream")
 
     def _is_image_request(self) -> bool:
         if self.image_request or self.endpoint.startswith("/v1/images"):

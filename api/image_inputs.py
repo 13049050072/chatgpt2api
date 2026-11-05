@@ -83,6 +83,20 @@ def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
         "response_format": _clean(fields.get("response_format"), "b64_json"),
         "stream": _parse_bool(fields.get("stream")),
     }
+    payload["animation"] = _parse_bool(fields.get("animation")) or False
+    payload["output_format"] = _clean(fields.get("output_format")) or None
+    for key, minimum, maximum in (("frame_count", 2, 64), ("frame_duration_ms", 20, 2000)):
+        value = fields.get(key)
+        if value is None or value == "":
+            payload[key] = None
+            continue
+        try:
+            parsed = int(value)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail={"error": f"{key} must be an integer"}) from exc
+        if parsed < minimum or parsed > maximum or (key == "frame_duration_ms" and parsed % 10):
+            raise HTTPException(status_code=400, detail={"error": f"invalid {key}"})
+        payload[key] = parsed
     if "client_task_id" in fields:
         payload["client_task_id"] = _clean(fields.get("client_task_id"))
     return payload

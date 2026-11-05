@@ -711,10 +711,14 @@ export function useDashboardPage() {
     stats.value[0].value = formatStatNumber(accounts.total)
     stats.value[1].value = formatStatNumber(accounts.active)
     stats.value[2].value = formatStatNumber(accounts.limited)
+    const nextRestore = accounts.next_restore_at ? new Date(accounts.next_restore_at) : null
+    stats.value[2].meta = nextRestore && Number.isFinite(nextRestore.getTime())
+      ? `预计 24 小时内恢复 ${formatStatNumber(accounts.restore_within_24h)} 个，最早 ${nextRestore.toLocaleString('zh-CN')}`
+      : '暂无有效的预计恢复时间'
     stats.value[3].value = formatStatNumber(accounts.abnormal)
     stats.value[4].value = formatStatNumber(accounts.disabled)
     stats.value[5].value = formatStatNumber(accounts.total_quota)
-    stats.value[5].meta = ''
+    stats.value[5].meta = `预检前空闲 ${formatStatNumber(accounts.idle_image_accounts)} 个，其中 ${formatStatNumber(accounts.idle_upload_accounts)} 个未处于上传冷却`
   }
 
   function applyTrendRangeToChartData(range: DashboardRangeStats) {
@@ -773,9 +777,13 @@ export function useDashboardPage() {
         accounts.total,
         accounts.active,
         accounts.limited,
+        accounts.next_restore_at,
+        accounts.restore_within_24h,
         accounts.abnormal,
         accounts.disabled,
         accounts.total_quota,
+        accounts.idle_image_accounts,
+        accounts.idle_upload_accounts,
       ],
       ranges: snapshot.meta.available_ranges.map((timeRange) => ({
         timeRange,

@@ -161,6 +161,7 @@ class AccountService:
         self._accounts = self._load_accounts()
         self._account_snapshot_checked_at = time.monotonic()
         self._image_inflight: dict[str, int] = {}
+        self._upload_cooldowns: dict[str, float] = {}
         self._image_failure_refresh_lock = Lock()
         self._image_failure_refresh_active: set[str] = set()
         self._image_failure_refresh_active_scopes: dict[str, str] = {}
@@ -693,6 +694,7 @@ class AccountService:
             return
         for token in removed_tokens:
             self._image_inflight.pop(token, None)
+            self._upload_cooldowns.pop(token, None)
         self._token_aliases = {
             source: target
             for source, target in self._token_aliases.items()
@@ -1364,6 +1366,12 @@ class AccountService:
             self._image_inflight[new_token] = (
                 int(self._image_inflight.get(new_token, 0)) + old_inflight
             )
+        cooldown = max(
+            [self._upload_cooldowns.get(new_token, 0)]
+            + [self._upload_cooldowns.pop(source, 0) for source in alias_sources if source != new_token]
+        )
+        if cooldown > time.monotonic():
+            self._upload_cooldowns[new_token] = cooldown
 
         with self._image_failure_refresh_lock:
             old_scopes = [
@@ -1842,6 +1850,7 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            needs_upload: bool = False,
     ) -> list[str]:
         excluded = set(excluded_tokens or set())
         return [
@@ -1853,6 +1862,7 @@ class AccountService:
                and self._account_matches_source_type(item, source_type)
                and (token := item.get("access_token") or "")
                and token not in excluded
+               and (not needs_upload or self._upload_cooldowns.get(token, 0) <= time.monotonic())
         ]
 
     def _list_available_candidate_tokens(
@@ -1861,6 +1871,7 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            needs_upload: bool = False,
     ) -> list[str]:
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
@@ -1870,6 +1881,7 @@ class AccountService:
                 plan_type,
                 source_type,
                 plan_types,
+                needs_upload,
             )
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
@@ -1880,6 +1892,7 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            needs_upload: bool = False,
             deadline_monotonic: float | None = None,
     ) -> str:
         while True:
@@ -1907,6 +1920,7 @@ class AccountService:
                     plan_type,
                     source_type,
                     plan_types,
+                    needs_upload,
                 ):
                     raise self._no_ready_candidate_error(
                         plan_type,
@@ -1919,6 +1933,7 @@ class AccountService:
                     plan_type,
                     source_type,
                     plan_types,
+                    needs_upload,
                 )
                 if tokens:
                     access_token = tokens[self._index % len(tokens)]
@@ -1991,6 +2006,24 @@ class AccountService:
         else:
             self._image_inflight[access_token] = current_inflight - 1
 
+    @staticmethod
+    def _has_upload_quota(account: dict) -> bool:
+        """Treat missing or malformed upload quota as unknown, not exhausted."""
+        limits = account.get("limits_progress")
+        if not isinstance(limits, list):
+            return True
+        for item in limits:
+            if not isinstance(item, dict) or item.get("feature_name") != "file_upload":
+                continue
+            remaining = item.get("remaining")
+            if remaining is None or isinstance(remaining, bool):
+                return True
+            try:
+                return int(remaining) > 0
+            except (TypeError, ValueError, OverflowError):
+                return True
+        return True
+
     def get_available_access_token(
             self,
             plan_type: str | None = None,
@@ -1998,6 +2031,7 @@ class AccountService:
             plan_types: set[str] | tuple[str, ...] | None = None,
             excluded_tokens: set[str] | None = None,
             deadline_monotonic: float | None = None,
+            needs_upload: bool = False,
     ) -> str:
         """从候选池中获取一个可用的图片生图 token。
 
@@ -2025,6 +2059,7 @@ class AccountService:
                     source_type=source_type,
                     plan_types=plan_types,
                     deadline_monotonic=deadline_monotonic,
+                    needs_upload=needs_upload,
                 )
             except ImageAccountSelectionError as exc:
                 if exc.kind == "deadline_exceeded":
@@ -2072,6 +2107,7 @@ class AccountService:
                     and self._account_matches_plan_type(account or {}, plan_type)
                     and self._account_matches_any_plan_type(account or {}, plan_types)
                     and self._account_matches_source_type(account or {}, source_type)
+                    and (not needs_upload or self._has_upload_quota(account or {}))
             ):
                 return str((account or {}).get("access_token") or access_token)
             if str((account or {}).get("status") or "") == "限流":
@@ -4072,6 +4108,11 @@ class AccountService:
                         != expected_generation
                     ):
                         return None
+                if failure is not None and failure.code == "file_upload_throttled":
+                    # A server-provided Retry-After is authoritative; otherwise use a
+                    # short probe interval so an unknown reset cannot lock an account out.
+                    seconds = min(86400, max(1, failure.retry_after or 60))
+                    self._upload_cooldowns[access_token] = time.monotonic() + seconds
                 next_item = dict(current)
                 next_item["last_used_at"] = now.isoformat()
                 image_quota_unknown = bool(next_item.get("image_quota_unknown"))
@@ -4997,6 +5038,8 @@ class AccountService:
         self._refresh_accounts_snapshot_if_stale()
         with self._lock:
             items = list(self._accounts.values())
+            idle_image_accounts = len(self._list_available_candidate_tokens())
+            idle_upload_accounts = len(self._list_available_candidate_tokens(needs_upload=True))
         total = len(items)
         active = sum(1 for a in items if a.get("status") == "正常")
         limited = sum(1 for a in items if a.get("status") == "限流")
@@ -5014,6 +5057,15 @@ class AccountService:
             )
             and not self._is_unlimited_image_quota_account(a)
         )
+        now = datetime.now(timezone.utc)
+        restore_times = [
+            restore for account in items
+            if account.get("status") == "限流"
+            and (restore := self._parse_time(account.get("restore_at"))) is not None
+            and restore > now
+        ]
+        next_restore = min(restore_times) if restore_times else None
+        restore_24h = sum(1 for restore in restore_times if restore <= now + timedelta(hours=24))
         total_success = sum(int(a.get("success") or 0) for a in items)
         total_fail = sum(int(a.get("fail") or 0) for a in items)
         by_type = {}
@@ -5028,6 +5080,10 @@ class AccountService:
             "abnormal": abnormal,
             "disabled": disabled,
             "total_quota": total_quota,
+            "idle_image_accounts": idle_image_accounts,
+            "idle_upload_accounts": idle_upload_accounts,
+            "next_restore_at": next_restore.isoformat() if next_restore else None,
+            "restore_within_24h": restore_24h,
             "unlimited_quota_count": unlimited,
             "unknown_quota_count": unknown_quota,
             "total_success": total_success,

@@ -167,6 +167,8 @@ Authorization: Bearer <auth-key>
 | `/v1/psd/generations`               | `POST`       | PSD 任务快捷入口                                     |
 | `/files/{file_path}`                | `GET`        | 公开下载随机存储路径下的生成文件                     |
 
+图片生成和编辑接口可设置 `animation: true` 或 `output_format: "gif"` 请求动图；可选 `frame_count`（2–64）与 `frame_duration_ms`（20–2000，10 毫秒的倍数）。系统通过提示词向上游请求动图，并在返回多帧 GIF 后按需调整；上游未返回动图时请求会失败。该能力依赖上游实际支持，Codex 图片链路未验证。
+
 文件任务的创建、查询和删除按 API Key 隔离；任务返回的 `/files/...` 链接与生成图片一样无需鉴权，持有链接即可下载。公开下载会校验路径及文件类型，拒绝路径穿越。
 
 <details>

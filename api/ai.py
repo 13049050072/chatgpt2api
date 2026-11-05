@@ -35,6 +35,10 @@ class ImageGenerationRequest(BaseModel):
     size: str | None = None
     quality: str = "auto"
     response_format: str = "b64_json"
+    animation: bool = False
+    output_format: str | None = None
+    frame_count: int | None = Field(default=None, ge=2, le=64)
+    frame_duration_ms: int | None = Field(default=None, ge=20, le=2000, multiple_of=10)
     history_disabled: bool = True
     stream: bool | None = None
 
