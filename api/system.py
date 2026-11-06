@@ -39,7 +39,7 @@ from contracts.settings import (
     SettingsView,
 )
 from contracts.updates import UpdateStatusView, UpdateTaskView
-from api.errors import FAILED_AUTH_DELAY_SECONDS
+from api.errors import FAILED_AUTH_DELAY_SECONDS, record_failed_key
 from api.support import extract_bearer_token, require_admin, require_identity, resolve_image_base_url
 from services.account_service import account_service
 from services.auth_view import build_auth_view
@@ -183,7 +183,7 @@ def create_router(app_version: str) -> APIRouter:
         return build_auth_view(app_version, identity)
 
     @router.get("/auth/status", response_model=AuthView)
-    async def auth_status(authorization: str | None = Header(default=None)):
+    async def auth_status(request: Request, authorization: str | None = Header(default=None)):
         try:
             identity = require_identity(authorization)
         except HTTPException as exc:
@@ -191,6 +191,7 @@ def create_router(app_version: str) -> APIRouter:
                 raise
             # The anonymous view still tells callers whether the key was valid.
             if extract_bearer_token(authorization):
+                record_failed_key(request)
                 await asyncio.sleep(FAILED_AUTH_DELAY_SECONDS)
             return build_auth_view(app_version)
         return build_auth_view(app_version, identity)

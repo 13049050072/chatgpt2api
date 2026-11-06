@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from api import accounts, ai, image_tasks, prompts, system
-from api.errors import install_exception_handlers
+from api.errors import FailedAuthLockoutMiddleware, install_exception_handlers
 from api.support import resolve_web_asset, start_account_lifecycle_watcher
 from services.account_service import account_service
 from services.auth_service import auth_service
@@ -118,6 +118,7 @@ def create_app() -> FastAPI:
             backup_service.stop()
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
     install_exception_handlers(app)
+    app.add_middleware(FailedAuthLockoutMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],

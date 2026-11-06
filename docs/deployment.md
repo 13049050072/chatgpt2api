@@ -64,6 +64,16 @@ curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/deploy/ins
 
 选择本地 PostgreSQL 时，脚本会自动生成并保存数据库密码，下载 `docker-compose.postgres.yml`，再与主 Compose 一起启动。重复运行安装脚本会复用已有密码。`CHATGPT2API_THREAD_TOKENS` 默认是 `120`，表示后端同步工作线程的并发容量，只要求正整数且不设置人为最高值；账号、代理和上游服务仍分别执行自己的并发限制。
 
+### 密钥错误锁定
+
+同一来源 IP 在 5 分钟内用错误密钥请求 10 次后，会被锁定 15 分钟。锁定期间，这个 IP 带密钥的请求一律返回 429 和 `Retry-After`，正确的密钥也不例外；不带密钥的请求（例如打开控制台页面）不受影响。计数只保存在进程内存中，服务重启后清零。可以在 `.env` 中调整：
+
+- `CHATGPT2API_AUTH_FAILURE_LIMIT`：触发锁定的错误次数，默认 `10`，设为 `0` 关闭锁定。
+- `CHATGPT2API_AUTH_FAILURE_WINDOW_SECONDS`：统计错误次数的时间窗口，默认 `300` 秒。
+- `CHATGPT2API_AUTH_LOCKOUT_SECONDS`：锁定时长，默认 `900` 秒，设为 `0` 关闭锁定。
+
+服务部署在 Nginx、Caddy 等反向代理之后时，必须设置 `FORWARDED_ALLOW_IPS`。否则服务看到的来源地址都是代理地址，一个人反复输错密钥会把所有人一起锁定。把它设为代理连到服务时使用的地址，多个地址用逗号分隔；宿主机上的代理转发到 Docker 容器时，这个地址通常是 Docker 网络的网关地址（例如 `172.18.0.1`，以容器看到的来源地址为准）。只有服务端口不对外开放时才能设为 `*`，否则客户端可以伪造 `X-Forwarded-For` 绕过锁定。源码运行时，在启动 uvicorn 的环境中设置同名环境变量。
+
 ## 本地开发
 
 后端：

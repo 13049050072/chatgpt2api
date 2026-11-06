@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Sequence
 
-from sqlalchemy import Column, Integer, String, Text, select, text
+from sqlalchemy import Column, Index, Integer, String, Text, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -29,8 +29,16 @@ class AccountModel(DatabaseBase):
     __tablename__ = "accounts"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    access_token = Column(Text, unique=True, nullable=False, index=True)
+    access_token = Column(Text, nullable=False)
     data = Column(Text, nullable=False)
+
+    # PostgreSQL B-tree entries cannot exceed about 2.7 KB, so long tokens are kept
+    # unique through their digest and looked up through a hash index there.
+    __table_args__ = (
+        Index("ix_accounts_access_token", access_token, unique=True).ddl_if(dialect="sqlite"),
+        Index("ux_accounts_access_token_md5", func.md5(access_token), unique=True).ddl_if(dialect="postgresql"),
+        Index("ix_accounts_access_token_hash", access_token, postgresql_using="hash").ddl_if(dialect="postgresql"),
+    )
 
 
 class AuthKeyModel(DatabaseBase):
@@ -56,6 +64,7 @@ class DatabaseStorageBackend(StorageBackend):
         self.engine = initialize_application_database(database_url)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
         self._widen_access_token_column()
+        self._use_access_token_digest_indexes()
         self._ensure_revision_rows()
 
     def _widen_access_token_column(self) -> None:
@@ -74,6 +83,50 @@ class DatabaseStorageBackend(StorageBackend):
         except Exception as exc:
             logger.warning({
                 "event": "accounts_access_token_column_widen_failed",
+                "error_type": type(exc).__name__,
+            })
+
+    def _use_access_token_digest_indexes(self) -> None:
+        """Replace the B-tree unique index older PostgreSQL schemas put on access_token.
+
+        create_all() never adds indexes to an existing table, so upgraded databases
+        get the digest indexes here; the old index is dropped only once they exist.
+        """
+        if self.engine.dialect.name != "postgresql":
+            return
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_accounts_access_token_md5 "
+                    "ON accounts (md5(access_token))"
+                ))
+                connection.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_accounts_access_token_hash "
+                    "ON accounts USING hash (access_token)"
+                ))
+                legacy = connection.execute(text(
+                    "SELECT index_class.relname, con.conname "
+                    "FROM pg_index AS idx "
+                    "JOIN pg_class AS index_class ON index_class.oid = idx.indexrelid "
+                    "JOIN pg_class AS table_class ON table_class.oid = idx.indrelid "
+                    "JOIN pg_namespace AS ns ON ns.oid = table_class.relnamespace "
+                    "JOIN pg_attribute AS att "
+                    "ON att.attrelid = table_class.oid AND att.attnum = idx.indkey[0] "
+                    "LEFT JOIN pg_constraint AS con ON con.conindid = idx.indexrelid "
+                    "WHERE ns.nspname = current_schema() AND table_class.relname = 'accounts' "
+                    "AND idx.indisunique AND idx.indnatts = 1 "
+                    "AND idx.indexprs IS NULL AND idx.indpred IS NULL "
+                    "AND att.attname = 'access_token'"
+                )).all()
+                quote = connection.dialect.identifier_preparer.quote
+                for index_name, constraint_name in legacy:
+                    if constraint_name:
+                        connection.execute(text(f"ALTER TABLE accounts DROP CONSTRAINT {quote(constraint_name)}"))
+                    else:
+                        connection.execute(text(f"DROP INDEX {quote(index_name)}"))
+        except Exception as exc:
+            logger.warning({
+                "event": "accounts_access_token_index_upgrade_failed",
                 "error_type": type(exc).__name__,
             })
 

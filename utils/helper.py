@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -610,6 +611,61 @@ def extract_prompt_from_message_content(content: object) -> str:
     return "\n".join(parts).strip()
 
 
+class BoundedTTLCache:
+    """Thread-safe LRU cache whose entries expire and whose total weight is capped."""
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float,
+        max_weight: int,
+        weigh: Callable[[Any], int] = lambda _value: 1,
+    ) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._max_weight = max_weight
+        self._weigh = weigh
+        self._lock = threading.Lock()
+        self._items: OrderedDict[Any, tuple[float, Any, int]] = OrderedDict()
+        self._weight = 0
+
+    def get(self, key: Any) -> Any:
+        now = time.monotonic()
+        with self._lock:
+            entry = self._items.get(key)
+            if entry is None:
+                return None
+            if entry[0] <= now:
+                self._pop_locked(key)
+                return None
+            self._items.move_to_end(key)
+            return entry[1]
+
+    def put(self, key: Any, value: Any) -> None:
+        weight = max(0, int(self._weigh(value)))
+        if weight > self._max_weight:
+            return
+        with self._lock:
+            self._pop_locked(key)
+            self._items[key] = (time.monotonic() + self._ttl_seconds, value, weight)
+            self._weight += weight
+            while self._weight > self._max_weight:
+                self._pop_locked(next(iter(self._items)))
+
+    def _pop_locked(self, key: Any) -> None:
+        entry = self._items.pop(key, None)
+        if entry is not None:
+            self._weight -= entry[2]
+
+
+# Each conversation turn resends its history; URL images from recent turns are
+# served from here instead of being downloaded again.
+_downloaded_message_images = BoundedTTLCache(
+    ttl_seconds=10 * 60,
+    max_weight=64 * 1024 * 1024,
+    weigh=lambda value: len(value[0]),
+)
+
+
 def _message_image_url(value: object) -> str:
     if isinstance(value, dict):
         return str(value.get("url") or value.get("image_url") or "").strip()
@@ -620,6 +676,11 @@ def _decode_message_image_url(value: object) -> tuple[bytes, str] | None:
     source = _message_image_url(value)
     if not source.startswith(("data:", "http://", "https://")):
         return None
+    remote = not source.startswith("data:")
+    if remote:
+        cached = _downloaded_message_images.get(source)
+        if cached is not None:
+            return cached
     # Public-host and redirect checks match image edits. Chat keeps the 10MB cap
     # and uses the configured egress proxy when one is set.
     from api.image_inputs import _download_image_url
@@ -629,6 +690,8 @@ def _decode_message_image_url(value: object) -> tuple[bytes, str] | None:
         max_bytes=MAX_JSON_IMAGE_BYTES,
         use_egress_proxy=True,
     )
+    if remote:
+        _downloaded_message_images.put(source, (image_data, mime_type))
     return image_data, mime_type
 
 

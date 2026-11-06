@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -45,6 +46,7 @@ from services.protocol.reasoning import normalize_thinking_effort
 from services.proxy_service import ProxyRuntimeProfile, proxy_settings
 from utils.file_names import sanitize_public_filename
 from utils.helper import (
+    BoundedTTLCache,
     UpstreamHTTPError,
     close_response_in_background,
     ensure_ok,
@@ -118,6 +120,10 @@ FILE_ID_RE = re.compile(r"\b(file[-_](?!service\b)[A-Za-z0-9_-]+)\b")
 REAL_IMAGE_FILE_ID_RE = re.compile(r"\bfile_00000000[a-f0-9]{24}\b")
 SEDIMENT_ID_RE = re.compile(r"sediment://([A-Za-z0-9_-]+)")
 IMAGE_POLL_SETTLE_SECS = 2.0
+# Conversation history resends the same images every turn. Uploads are reused per
+# account (keyed by a token digest) and image digest; a file the upstream deletes
+# sooner than this would fail the one request that reuses it.
+_uploaded_images = BoundedTTLCache(ttl_seconds=30 * 60, max_weight=256)
 CODEX_RESPONSES_INSTRUCTIONS = (
     "Use the image_generation tool to create exactly one image for the user's request. "
     "Return the generated image result."
@@ -1520,6 +1526,13 @@ class OpenAIBackendAPI:
             candidate_path = Path(os.path.expanduser(image))
             if candidate_path.exists() and candidate_path.is_file():
                 file_name = candidate_path.name
+        cache_key = (
+            hashlib.sha256(str(self.access_token or "").encode("utf-8")).hexdigest(),
+            hashlib.sha256(data).hexdigest(),
+        )
+        cached = _uploaded_images.get(cache_key)
+        if cached is not None:
+            return dict(cached)
         image = Image.open(BytesIO(data))
         width, height = image.size
         mime_type = Image.MIME.get(image.format, "image/png")
@@ -1557,7 +1570,7 @@ class OpenAIBackendAPI:
             timeout=60,
         )
         ensure_ok(response, path)
-        return {
+        uploaded = {
             "file_id": upload_meta["file_id"],
             "file_name": file_name,
             "file_size": len(data),
@@ -1565,6 +1578,8 @@ class OpenAIBackendAPI:
             "width": width,
             "height": height,
         }
+        _uploaded_images.put(cache_key, dict(uploaded))
+        return uploaded
 
     def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
                                 references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:
