@@ -13,6 +13,7 @@ from api import accounts, ai, image_tasks, prompts, system
 from api.errors import install_exception_handlers
 from api.support import resolve_web_asset, start_account_lifecycle_watcher
 from services.account_service import account_service
+from services.auth_service import auth_service
 from services.backup_service import backup_service
 from services.config import config
 from services.dashboard_metrics_service import dashboard_metrics_service
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         _configure_threadpool()
+        auth_service.start()
         start_genbox_push_service()
         image_task_service.start()
         try:

@@ -419,7 +419,7 @@ class AuthService:
         if not candidate:
             return None
         candidate_hash = _hash_key(candidate)
-        self._ensure_background_worker()
+        self.start()
         if not self._snapshot_is_usable():
             # Never load on the caller's thread (the event loop); let the
             # background refresher catch up and report the store as unavailable.
@@ -444,7 +444,8 @@ class AuthService:
             self._background_wakeup.set()
         return self._public_item(next_item)
 
-    def _ensure_background_worker(self) -> None:
+    def start(self) -> None:
+        """Start the snapshot refresher; without it an idle snapshot ages past the staleness limit."""
         thread = self._background_thread
         if thread is not None and thread.is_alive():
             return
