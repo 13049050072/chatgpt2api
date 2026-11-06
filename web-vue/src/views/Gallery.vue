@@ -82,7 +82,7 @@
           </Button>
           <Button
             size="xs"
-            variant="ghost"
+            variant="outline"
             :disabled="selectedCount === 0 || batchBusy"
             @click="clearSelection"
           >
@@ -259,7 +259,7 @@
               @update:model-value="targetFreeMb = String($event)"
             />
             <div class="gallery-storage-target-actions">
-              <Button size="sm" variant="ghost" :disabled="isStorageBusy" @click="handleCleanupToTarget(true)">
+              <Button size="sm" variant="outline" :disabled="isStorageBusy" @click="handleCleanupToTarget(true)">
                 预估
               </Button>
               <Button size="sm" variant="outline" :disabled="isStorageBusy" @click="handleCleanupToTarget(false)">
@@ -270,7 +270,7 @@
         </ModalBody>
 
         <ModalFooter align="between" compact>
-          <Button size="sm" variant="ghost" :disabled="isStorageBusy" @click="refreshStorageStats">
+          <Button size="sm" variant="outline" :disabled="isStorageBusy" @click="refreshStorageStats">
             {{ isStorageBusy ? '处理中...' : '刷新统计' }}
           </Button>
           <div class="gallery-storage-actions">

@@ -254,10 +254,6 @@ const {
   modelResponseTimeTimeRange,
   activityBuckets,
   activityHasData,
-  trendChartRef,
-  responseTimeChartRef,
-  modelResponseTimeChartRef,
-  modelChartRef,
 } = useDashboardPage()
 
 const callStats = computed(() => {

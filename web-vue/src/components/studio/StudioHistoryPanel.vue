@@ -9,7 +9,7 @@
           </Button>
           <Button
             size="sm"
-            variant="ghost"
+            variant="outline"
             icon-only
             root-class="rounded-xl"
             :disabled="!conversations.length"
@@ -133,7 +133,7 @@
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
 import { Button } from 'nanocat-ui'
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useWindowedList } from '@/composables/useWindowedList'
 import type { StudioConversation, StudioConversationBadge } from './types'
 
@@ -177,7 +177,7 @@ let suppressSelect = false
 
 const canDrag = computed(() => !query.value.trim() && !editingId.value && props.conversations.length > 1)
 
-function setEditInputRef(element: Element | null) {
+function setEditInputRef(element: Element | ComponentPublicInstance | null) {
   editInputRef.value = element instanceof HTMLInputElement ? element : null
 }
 

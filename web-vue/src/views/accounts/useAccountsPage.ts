@@ -1,4 +1,5 @@
 import { computed, ref, toRef } from 'vue'
+import type { SelectOption } from 'nanocat-ui'
 import { accountsApi } from '@/api/accounts'
 import type {
   Account,
@@ -81,13 +82,13 @@ export function useAccountsPage() {
 
   const currentPage = accountListQuery.currentPage
   const accountListTotal = accountListQuery.total
-  const statusFilterOptions = [
+  const statusFilterOptions: SelectOption[] = [
     { label: '全部状态', value: 'all' },
     { label: '正常', value: 'normal' },
     { label: '限流', value: 'limited' },
     { label: '异常', value: 'abnormal' },
     { label: '禁用', value: 'disabled' },
-  ] as const
+  ]
 
   const groupFilterOptions = computed(() => [
     { label: '全部账号组', value: 'all' },

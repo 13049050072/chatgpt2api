@@ -5,7 +5,7 @@
       <Button
         v-if="variant !== 'row' && copyable && value"
         size="xs"
-        variant="ghost"
+        variant="outline"
         @click="$emit('copy', value)"
       >
         复制

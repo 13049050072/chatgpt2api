@@ -72,7 +72,7 @@
               @update:model-value="updateAdvancedConditions"
             />
           </div>
-          <Button size="sm" variant="ghost" :disabled="activeSystemFilterCount === 0" @click="resetFilters">
+          <Button size="sm" variant="outline" :disabled="activeSystemFilterCount === 0" @click="resetFilters">
             重置
           </Button>
         </FilterToolbar>
@@ -189,19 +189,14 @@ import LogsDetailDrawer from '@/views/logs/LogsDetailDrawer.vue'
 import LogsSystemTable from '@/views/logs/LogsSystemTable.vue'
 import {
   activeSystemFilterCount as countActiveSystemFilters,
-  advancedConditionCount as countAdvancedConditions,
   buildAdvancedConditionMenuGroups,
   buildAdvancedConditionSelection,
   buildSystemQuickFilterSelection,
   cleanLogString,
-  filenameFromUrl,
   isQuickEndpointValue,
   latestAdvancedConditionValue,
   latestQuickEndpointValue,
   systemMetricItems as buildSystemMetricItems,
-  statusLabel,
-  statusTone,
-  summaryText,
   systemQuickFilterGroups,
 } from '@/views/logs/logsView'
 
@@ -415,7 +410,6 @@ const activeSystemFilterCount = computed(() => countActiveSystemFilters(filters)
 
 const systemQuickFilterSelection = computed(() => buildSystemQuickFilterSelection(filters))
 
-const advancedConditionCount = computed(() => countAdvancedConditions(filters))
 const advancedConditionMenuGroups = computed(() => buildAdvancedConditionMenuGroups(logMeta.facets.models, logMeta.facets.accounts))
 const advancedConditionSelection = computed(() => buildAdvancedConditionSelection(filters))
 

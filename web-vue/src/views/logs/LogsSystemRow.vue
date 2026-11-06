@@ -131,7 +131,7 @@
         </Button>
         <Button
           size="xs"
-          variant="ghost"
+          variant="outline"
           root-class="text-rose-600 hover:text-rose-700"
           @click="handleRequestDelete"
         >

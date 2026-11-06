@@ -42,7 +42,7 @@
   <SideDock
     :open="open && minimizable && minimized"
     :draggable="true"
-    aria-label="展开详情面板"
+    ariaLabel="展开详情面板"
     :z-index="zIndex"
     width="10rem"
     @click="minimized = false"

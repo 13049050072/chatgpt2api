@@ -781,7 +781,7 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
-import { Button, Checkbox, EmptyState, GroupedSelectMenu, HelpTip, Input, TableShell, ViewModeSwitch } from 'nanocat-ui'
+import { Button, Checkbox, EmptyState, GroupedSelectMenu, HelpTip, Input, TableShell, ViewModeSwitch, type SelectOption } from 'nanocat-ui'
 import type { Account } from '@/api/accounts'
 import FilterToolbar from '@/components/ai/FilterToolbar.vue'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
@@ -840,7 +840,6 @@ const {
   groupFilterOptions,
   sourceFilterOptions,
   editingId,
-  accounts,
   accountListTotal,
   accountAllTotal,
   selectedCount,
@@ -869,7 +868,6 @@ const {
   manualTokenText,
   sessionJsonText,
   accountGroups,
-  proxyGroups,
   accountGroupsLoading,
   showAccountGroupsModal,
   accountGroupSaving,
@@ -916,7 +914,6 @@ const {
   testAccountProxy,
   openAccountGroupsModal,
   closeAccountGroupsModal,
-  resetAccountGroupForm,
   editAccountGroup,
   saveAccountGroup,
   deleteAccountGroup,
@@ -973,10 +970,10 @@ const accountToolbarMenuClass = 'shrink-0 whitespace-nowrap'
 const accountToolbarButtonClass = 'shrink-0 whitespace-nowrap justify-between gap-2'
 const accountStatusDetailCardClass = 'w-72 account-status-detail-card'
 const accountToolbarSecondaryClass = `${accountToolbarButtonClass} text-muted-foreground`
-const accountSourceOptions = [
+const accountSourceOptions: SelectOption[] = [
   { label: 'Web', value: 'web' },
   { label: 'Codex', value: 'codex' },
-] as const
+]
 function setSourceFilter(value: string | number) {
   if (value === 'all' || value === 'web' || value === 'codex') {
     sourceFilter.value = value

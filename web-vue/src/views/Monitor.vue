@@ -422,7 +422,7 @@ function applyRefreshInterval(restart = true) {
   }
 }
 
-pageRuntime.onActivate(({ initial }) => {
+pageRuntime.onActivate(() => {
   activateMonitor(true)
 })
 

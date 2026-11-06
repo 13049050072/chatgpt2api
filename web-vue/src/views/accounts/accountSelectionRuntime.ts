@@ -96,7 +96,7 @@ export function useAccountSelectionRuntime(options: AccountSelectionRuntimeOptio
       : selectedSet.value.has(accountId)
   }
 
-  function toggleSelect(accountId: string, checked?: boolean) {
+  function toggleSelect(accountId: string, checked?: unknown) {
     if (scopedSelectionActive.value) {
       const next = new Set(excludedIds.value)
       const shouldSelect = typeof checked === 'boolean' ? checked : next.has(accountId)

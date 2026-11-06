@@ -27,7 +27,7 @@
         <div class="chat-header-title">
           <Button
             size="sm"
-            variant="ghost"
+            variant="outline"
             icon-only
             root-class="chat-header-icon lg:hidden"
             title="打开会话列表"
@@ -59,7 +59,7 @@
           </Button>
           <Button
             size="sm"
-            variant="ghost"
+            variant="outline"
             icon-only
             root-class="chat-header-action-button"
             :title="isFullscreen ? '退出全屏' : '全屏'"
@@ -524,10 +524,6 @@ const sendMessage = sendRuntime.sendMessage
 const chatModelOptions = modelFormRuntime.chatModelOptions
 const imageModelOptions = modelFormRuntime.imageModelOptions
 
-function ensureConversation(content = '') {
-  return conversationActionsRuntime.ensureConversation(content)
-}
-
 function createConversation(seed = '') {
   const conversation = conversationActionsRuntime.createConversation(seed)
   isMobileHistoryOpen.value = false
@@ -785,10 +781,6 @@ async function downloadPreviewImage() {
   } catch (error: any) {
     toast.error(`下载失败：${error.message || '无法读取图片文件'}`)
   }
-}
-
-function scrollToBottom() {
-  scrollRuntime.scrollToBottom()
 }
 
 function scheduleScrollToBottom() {

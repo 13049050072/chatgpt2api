@@ -74,8 +74,11 @@ const canShowCopy = computed(() => props.showActions && props.showCopyAction)
 const canShowTag = computed(() => props.showActions && props.showTagAction)
 
 function emitFile(event: 'download' | 'copy' | 'edit-tags') {
-  if (!props.file) return
-  emit(event, props.file)
+  const file = props.file
+  if (!file) return
+  if (event === 'download') emit('download', file)
+  else if (event === 'copy') emit('copy', file)
+  else emit('edit-tags', file)
 }
 </script>
 

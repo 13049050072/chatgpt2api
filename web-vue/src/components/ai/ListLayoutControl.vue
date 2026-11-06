@@ -15,7 +15,7 @@
 </template>
 
 <script setup lang="ts">
-import { GroupedSelectMenu } from 'nanocat-ui'
+import { GroupedSelectMenu, type SelectOption } from 'nanocat-ui'
 
 import type { ListLayoutMode } from '@/composables/useListLayoutPreference'
 
@@ -27,10 +27,10 @@ const emit = defineEmits<{
   (event: 'update:modelValue', value: ListLayoutMode): void
 }>()
 
-const layoutOptions = [
+const layoutOptions: SelectOption[] = [
   { label: '工作区滚动', value: 'workspace' },
   { label: '随页面展开', value: 'page' },
-] as const
+]
 
 function updateValue(value: string | string[]) {
   const next = Array.isArray(value) ? value[0] : value

@@ -375,7 +375,6 @@
 </template>
 
 <script setup lang="ts">
-import { Icon } from '@iconify/vue'
 import {
   Button,
   Checkbox,
@@ -463,7 +462,6 @@ const fallbackCustomProxyInput = proxyDefaultRuntime.fallbackCustomProxyInput
 const defaultTestResult = proxyDefaultRuntime.defaultTestResult
 const defaultProxyGroupOptions = proxyDefaultRuntime.defaultProxyGroupOptions
 const fallbackProxyGroupOptions = proxyDefaultRuntime.fallbackProxyGroupOptions
-const effectiveDefault = proxyDefaultRuntime.effectiveDefault
 const canTestDefaultProxy = proxyDefaultRuntime.canTestDefaultProxy
 const isDefaultProxyDirty = proxyDefaultRuntime.isDefaultProxyDirty
 const setDefaultProxyMode = proxyDefaultRuntime.setDefaultProxyMode

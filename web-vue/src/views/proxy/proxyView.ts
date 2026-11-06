@@ -1,4 +1,4 @@
-import type { ActionMenuItem } from 'nanocat-ui'
+import type { ActionMenuItem, SelectOption } from 'nanocat-ui'
 import type { ProxyGroup, ProxyNode, ProxyTestResult, ProxyTestTone } from '@/api/proxy'
 import { actionMenuGroups } from '@/components/ai/menuItems'
 
@@ -12,18 +12,18 @@ export function proxyTestToastType(tone: ProxyTestTone): ProxyTestSummaryTone {
   return 'error'
 }
 
-export const defaultProxyModeOptions = [
+export const defaultProxyModeOptions: SelectOption[] = [
   { label: '直连', value: 'direct' },
   { label: '代理组', value: 'group' },
   { label: '自定义代理', value: 'custom' },
-] as const
+]
 
-export const fallbackProxyModeOptions = [
+export const fallbackProxyModeOptions: SelectOption[] = [
   { label: '关闭', value: 'off' },
   { label: '直连', value: 'direct' },
   { label: '代理组', value: 'group' },
   { label: '自定义代理', value: 'custom' },
-] as const
+]
 
 const defaultProxyModes = new Set<string>(defaultProxyModeOptions.map((item) => item.value))
 const fallbackProxyModes = new Set<string>(fallbackProxyModeOptions.map((item) => item.value))

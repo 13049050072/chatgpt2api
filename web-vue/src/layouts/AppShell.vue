@@ -18,7 +18,7 @@
         v-if="isSidebarOpen && isMobileViewport"
         class="fixed inset-0 z-30 bg-black/20 lg:hidden"
         aria-hidden="true"
-        @click="closeSidebar"
+        @click="closeSidebar()"
       ></div>
       <aside
         ref="sidebarRef"

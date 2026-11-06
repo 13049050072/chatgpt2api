@@ -1,5 +1,6 @@
 <template>
   <div class="date-range-inputs">
+    <!-- @vue-expect-error nanocat-ui types omit "date"; Input renders a native date input. -->
     <Input
       :model-value="start"
       type="date"
@@ -7,6 +8,7 @@
       @update:model-value="emit('update:start', String($event || ''))"
     />
     <span class="date-range-separator">{{ separator }}</span>
+    <!-- @vue-expect-error nanocat-ui types omit "date"; Input renders a native date input. -->
     <Input
       :model-value="end"
       type="date"

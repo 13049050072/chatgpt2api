@@ -109,7 +109,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Button, GroupedSelectMenu } from 'nanocat-ui'
+import { Button, GroupedSelectMenu, type SegmentedOption } from 'nanocat-ui'
 
 import type { Account, AccountTestMode, AccountTestResult } from '@/api/accounts'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
@@ -143,10 +143,10 @@ const emit = defineEmits<{
   'update:prompt': [value: string]
 }>()
 
-const modeOptions = [
+const modeOptions: SegmentedOption[] = [
   { label: '对话', value: 'chat' },
   { label: '画图', value: 'image' },
-] as const
+]
 
 const modelSelectOptions = computed(() => props.modelOptions.map((value) => ({
   label: value,

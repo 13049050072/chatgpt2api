@@ -7,7 +7,7 @@
   >
     <div class="detail-text-block__header">
       <span class="detail-text-block__title">{{ title }}</span>
-      <Button size="xs" variant="ghost" @click="$emit('copy', content)">
+      <Button size="xs" variant="outline" @click="$emit('copy', content)">
         复制
       </Button>
     </div>

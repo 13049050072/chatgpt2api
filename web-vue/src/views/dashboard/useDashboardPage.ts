@@ -1,4 +1,4 @@
-import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { statsApi } from '@/api/stats'
 import type {
   DashboardAccountStats,
@@ -270,10 +270,10 @@ export function useDashboardPage() {
     promise: Promise<boolean>
     controller: AbortController
   } | null = null
-  const trendChartRef = ref<HTMLDivElement | null>(null)
-  const modelChartRef = ref<HTMLDivElement | null>(null)
-  const responseTimeChartRef = ref<HTMLDivElement | null>(null)
-  const modelResponseTimeChartRef = ref<HTMLDivElement | null>(null)
+  const trendChartRef = useTemplateRef<HTMLDivElement>('trendChartRef')
+  const modelChartRef = useTemplateRef<HTMLDivElement>('modelChartRef')
+  const responseTimeChartRef = useTemplateRef<HTMLDivElement>('responseTimeChartRef')
+  const modelResponseTimeChartRef = useTemplateRef<HTMLDivElement>('modelResponseTimeChartRef')
 
   const charts = {
     trend: null as ChartInstance | null,
@@ -1060,9 +1060,5 @@ export function useDashboardPage() {
     modelResponseTimeTimeRange,
     activityBuckets,
     activityHasData,
-    trendChartRef,
-    responseTimeChartRef,
-    modelResponseTimeChartRef,
-    modelChartRef,
   }
 }

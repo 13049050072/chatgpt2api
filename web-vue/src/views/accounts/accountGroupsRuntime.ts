@@ -154,7 +154,8 @@ export function useAccountGroupsRuntime(options: AccountGroupsRuntimeOptions) {
     projectedAccountGroupProxyLabel.value = ''
   }
 
-  function setAccountGroupProxyMode(mode: string) {
+  function setAccountGroupProxyMode(value: string | string[]) {
+    const mode = Array.isArray(value) ? value[0] ?? '' : value
     const nextMode = ['global', 'direct', 'group', 'custom'].includes(mode)
       ? mode as AccountProxyMode
       : 'global'
@@ -173,7 +174,8 @@ export function useAccountGroupsRuntime(options: AccountGroupsRuntimeOptions) {
     }
   }
 
-  function selectAccountGroupProxyGroup(groupId: string) {
+  function selectAccountGroupProxyGroup(value: string | string[]) {
+    const groupId = Array.isArray(value) ? value[0] ?? '' : value
     beginAccountGroupProxyDraft()
     selectedAccountGroupProxyGroupId.value = groupId.trim()
     accountGroupProxyMode.value = 'group'

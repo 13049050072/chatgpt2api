@@ -1,4 +1,5 @@
 import { computed, ref, type Ref } from 'vue'
+import type { SelectOption } from 'nanocat-ui'
 
 import type { AccountProxyProjection } from '@/api/accounts'
 import { proxyApi, serializeProxyReference, type ProxyGroup, type ProxyTestResult } from '@/api/proxy'
@@ -14,12 +15,12 @@ type AccountProxyRuntimeOptions = {
   setError: (prefix: string, error: unknown, notify?: boolean) => void
 }
 
-const accountProxyModeOptions = [
+const accountProxyModeOptions: SelectOption[] = [
   { label: '使用默认代理', value: 'global' },
   { label: '强制直连', value: 'direct' },
   { label: '代理组（多节点）', value: 'group' },
   { label: '自定义代理', value: 'custom' },
-] as const
+]
 
 export function useAccountProxyRuntime(options: AccountProxyRuntimeOptions) {
   const proxyTesting = ref(false)
@@ -82,7 +83,8 @@ export function useAccountProxyRuntime(options: AccountProxyRuntimeOptions) {
     projectedProxyLabel.value = ''
   }
 
-  function setProxyMode(mode: string) {
+  function setProxyMode(value: string | string[]) {
+    const mode = Array.isArray(value) ? value[0] ?? '' : value
     const nextMode = ['global', 'direct', 'group', 'custom'].includes(mode)
       ? mode as AccountProxyMode
       : 'global'
@@ -99,7 +101,8 @@ export function useAccountProxyRuntime(options: AccountProxyRuntimeOptions) {
     }
   }
 
-  function selectProxyGroup(groupId: string) {
+  function selectProxyGroup(value: string | string[]) {
+    const groupId = Array.isArray(value) ? value[0] ?? '' : value
     beginProxyDraft()
     selectedProxyGroupId.value = groupId.trim()
     proxyMode.value = 'group'
