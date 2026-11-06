@@ -203,6 +203,30 @@ class AccountService:
     def _decode_jwt_payload(token: str) -> dict:
         return decode_access_token_payload(token)
 
+    @classmethod
+    def _upstream_token_identity(cls, token: str) -> tuple[str, str]:
+        claims = cls._decode_jwt_payload(token)
+        auth = claims.get("https://api.openai.com/auth")
+        auth = auth if isinstance(auth, dict) else {}
+        account_id = str(auth.get("chatgpt_account_id") or "").strip()
+        user_id = str(auth.get("chatgpt_user_id") or claims.get("sub") or "").strip()
+        return account_id, user_id
+
+    @classmethod
+    def _same_upstream_identity(cls, token: str, candidate: dict) -> bool:
+        account_id, user_id = cls._upstream_token_identity(token)
+        other_account_id, other_user_id = cls._upstream_token_identity(
+            str(candidate.get("access_token") or "")
+        )
+        if account_id and other_account_id:
+            return account_id == other_account_id and not (
+                user_id and other_user_id and user_id != other_user_id
+            )
+        if account_id or other_account_id:
+            return False
+        other_user_id = other_user_id or str(candidate.get("user_id") or "").strip()
+        return bool(user_id and other_user_id and user_id == other_user_id)
+
     @staticmethod
     def _management_id_for_token(access_token: str) -> str:
         digest = hashlib.sha256(str(access_token or "").encode("utf-8")).hexdigest()[:24]
@@ -2249,6 +2273,9 @@ class AccountService:
                 fingerprints = candidate.get("access_token_fingerprints")
                 if isinstance(fingerprints, list) and fingerprint in fingerprints:
                     return dict(candidate)
+            for candidate in self._accounts.values():
+                if self._same_upstream_identity(token, candidate):
+                    return dict(candidate)
         return None
 
     def get_account_by_id(self, account_id: str) -> dict | None:
@@ -2818,6 +2845,7 @@ class AccountService:
         with self._lock:
             added = 0
             skipped = len(input_tokens) - len(deduped)
+            rotations: list[tuple[str, str]] = []
             outcomes_by_token: dict[str, str] = {}
             management_id_owners = {
                 str(account.get("management_id") or "").strip().lower(): token
@@ -2834,20 +2862,21 @@ class AccountService:
             }
             for access_token, payload in deduped.items():
                 resolved_token = self._resolve_access_token_locked(access_token)
-                if resolved_token != access_token and resolved_token in self._accounts:
-                    # Re-importing a rotated token must not recreate its former account.
-                    skipped += 1
-                    outcomes_by_token[access_token] = "skipped"
-                    continue
                 current = self._accounts.get(access_token)
+                old_token = access_token
                 if current is None:
                     fingerprint = self._access_token_fingerprint(access_token)
-                    if fingerprint in token_fingerprint_owners:
-                        # Persisted fingerprints preserve rotation lineage across restarts
-                        # without storing former access tokens.
-                        skipped += 1
-                        outcomes_by_token[access_token] = "skipped"
-                        continue
+                    old_token = (
+                        resolved_token if resolved_token in self._accounts
+                        else token_fingerprint_owners.get(fingerprint, "")
+                    )
+                    if not old_token and not preserve_lifecycle:
+                        old_token = next((
+                            token for token, candidate in self._accounts.items()
+                            if self._same_upstream_identity(access_token, candidate)
+                        ), "")
+                    current = self._accounts.get(old_token)
+                if current is None:
                     added += 1
                     outcomes_by_token[access_token] = "added"
                     current = {"created_at": self._now()}
@@ -2859,6 +2888,19 @@ class AccountService:
                     payload,
                     preserve_lifecycle=preserve_lifecycle,
                 )
+                if old_token and old_token != access_token and old_token in self._accounts:
+                    self._scrub_diagnostic_secrets(incoming, [current.get("access_token"), current.get("refresh_token"), current.get("id_token")])
+                    incoming.update({
+                        "last_token_refresh_error": None, "last_token_refresh_error_at": None,
+                        "last_refresh_error": None, "last_refresh_error_at": None,
+                        "last_invalid_at": None, "invalid_count": 0,
+                    })
+                    if current.get("status") == "异常":
+                        incoming["status"] = "正常"
+                    if current.get("last_remote_check_result") == "invalid":
+                        incoming.update({"last_remote_check_result": None, "last_remote_check_error": None,
+                                         "last_remote_check_error_at": None, "last_remote_check_event": None,
+                                         "pending_auth_remove_invalid": None, "pending_auth_scope": None})
                 if not incoming.get("created_at"):
                     incoming.pop("created_at", None)
                 merged = {**current, **incoming, "access_token": access_token}
@@ -2873,13 +2915,19 @@ class AccountService:
                     used_management_ids = {
                         management_id
                         for management_id, owner in management_id_owners.items()
-                        if owner != access_token
+                        if owner != old_token
                     }
                     account["management_id"] = self._unique_management_id(
                         access_token,
                         account.get("management_id"),
                         used_management_ids,
                     )
+                    if old_token != access_token and old_token in self._accounts:
+                        self._accounts.pop(old_token)
+                        rotations.append((old_token, account["management_id"]))
+                        for fingerprint, owner in list(token_fingerprint_owners.items()):
+                            if owner == old_token:
+                                token_fingerprint_owners[fingerprint] = access_token
                     self._accounts[access_token] = account
                     if (
                         previous_management_id
@@ -2894,6 +2942,18 @@ class AccountService:
             self._save_accounts(
                 conflict_existing_tokens=conflict_existing_tokens,
             )
+            for old_token, management_id in rotations:
+                final_token = next((token for token, account in self._accounts.items()
+                                    if account.get("management_id") == management_id), "")
+                if final_token:
+                    sources = {source for source in {old_token, *self._token_aliases}
+                               if source == old_token or self._resolve_access_token_locked(source) == old_token}
+                    self._token_aliases.pop(final_token, None)
+                    self._move_account_runtime_token_locked(final_token, sources)
+                else:
+                    self._remove_account_runtime_state_locked({old_token})
+            if rotations:
+                self._image_slot_condition.notify_all()
             for access_token in conflict_existing_tokens:
                 if outcomes_by_token.get(access_token) != "added":
                     continue

@@ -119,6 +119,7 @@ class AccountUpdateRequest(BaseModel):
     id: str = ""
     access_token: str = ""
     refresh_token: str = ""
+    id_token: str = ""
     type: str | None = None
     source_type: str | None = None
     quota: int | None = None
@@ -1434,14 +1435,16 @@ def create_router() -> APIRouter:
             ) from exc
 
         targets: list[tuple[str, str]] = []
+        target_ids: set[str] = set()
         sensitive_values = list(tokens)
         proxy_values: list[str] = []
         for token in tokens:
             account = _get_account_by_token_identity(token)
             account_id = _clean_text((account or {}).get("management_id"))
             active_token = _clean_text((account or {}).get("access_token")) or token
-            if account_id:
+            if account_id and account_id not in target_ids:
                 targets.append((active_token, account_id))
+                target_ids.add(account_id)
             for key in ("refresh_token", "id_token"):
                 value = _clean_text((account or {}).get(key))
                 if value:
@@ -1962,10 +1965,13 @@ def create_router() -> APIRouter:
         if uses_management_id:
             replacement_access_token = _clean_text(body.access_token)
             replacement_refresh_token = _clean_text(body.refresh_token)
+            replacement_id_token = _clean_text(body.id_token)
             if replacement_access_token:
                 updates["access_token"] = replacement_access_token
             if replacement_refresh_token:
                 updates["refresh_token"] = replacement_refresh_token
+            if replacement_id_token:
+                updates["id_token"] = replacement_id_token
         if not updates:
             raise HTTPException(status_code=400, detail={"error": "no updates provided"})
         access_token = _clean_text(current.get("access_token"))
