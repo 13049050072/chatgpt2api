@@ -14,6 +14,7 @@ from services.gallery_view import gallery_page
 from services.image_storage_service import (
     ImageBatchDeleteError,
     image_local_path,
+    image_media_type,
     image_storage_service,
     normalize_image_relative_path,
 )
@@ -37,11 +38,15 @@ def get_image_response(relative_path: str) -> FileResponse | Response:
         "Access-Control-Allow-Headers": "*",
     }
     if image_storage_service.has_local(relative_path):
+        rel = normalize_image_relative_path(relative_path)
         return FileResponse(
-            image_local_path(relative_path, require_file=True),
+            image_local_path(rel, require_file=True),
+            media_type=image_media_type(rel),
             headers=headers,
         )
-    return Response(content=image_storage_service.get_bytes(relative_path), media_type="image/gif" if relative_path.lower().endswith(".gif") else "image/png", headers=headers)
+    rel = normalize_image_relative_path(relative_path)
+    payload = image_storage_service.get_bytes(rel)
+    return Response(content=payload, media_type=image_media_type(rel, payload), headers=headers)
 
 
 def _thumbnail_path(relative_path: str) -> Path:
@@ -104,17 +109,19 @@ def get_image_download_response(relative_path: str) -> FileResponse:
         "Access-Control-Allow-Headers": "*",
     }
     if image_storage_service.has_local(relative_path):
-        path = image_local_path(relative_path, require_file=True)
+        rel = normalize_image_relative_path(relative_path)
+        path = image_local_path(rel, require_file=True)
         headers = {**cors_headers, "Content-Disposition": f'attachment; filename="{path.name}"'}
-        return FileResponse(path, filename=path.name, headers=headers)
+        return FileResponse(path, filename=path.name, media_type=image_media_type(rel), headers=headers)
     rel = normalize_image_relative_path(relative_path)
     headers = {
         **cors_headers,
         "Content-Disposition": f'attachment; filename="{Path(rel).name}"',
     }
+    payload = image_storage_service.get_bytes(rel)
     return Response(
-        content=image_storage_service.get_bytes(rel),
-        media_type="image/gif" if rel.lower().endswith(".gif") else "image/png",
+        content=payload,
+        media_type=image_media_type(rel, payload),
         headers=headers,
     )
 
@@ -370,7 +377,7 @@ def delete_to_target(target_free_mb: int, dry_run: bool = False) -> dict:
         return {"removed": 0, "current_free_mb": current_free, "target_free_mb": target_free_mb, "done": True}
 
     files = sorted(
-        (p for p in config.images_dir.rglob("*") if p.is_file() and p.suffix.lower() in {".png", ".gif"}),
+        (p for p in config.images_dir.rglob("*") if p.is_file() and p.suffix.lower() in {".png", ".gif", ".jpg", ".jpeg", ".webp"}),
         key=lambda p: p.stat().st_mtime,
     )
     removals = image_storage_service.delete_local_copies_until(

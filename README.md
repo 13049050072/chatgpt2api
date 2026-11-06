@@ -49,7 +49,7 @@
   </tr>
   <tr>
     <td valign="middle">
-      &nbsp;<strong><a href="https://www.ipwo.net/?ref=githubchatgpt2api"><u>IPWO</u></a></strong>&nbsp;覆盖195+地区动态住宅代理、静态住宅代理和不限量住宅代理支持HTTP、HTTPS及SOCKS5协议，为AI应用、多账号管理、自动化及海外网络访问提供灵活的代理解决方案。专属折扣码：<strong>0205</strong>
+      &nbsp;<strong><a href="https://www.ipwo.net/?ref=githubchatgpt2api"><u>IPWO</u></a></strong>&nbsp;覆盖195+地区动态住宅代理、静态住宅代理和不限量住宅代理支持HTTP、HTTPS及SOCKS5协议，为AI应用、多账号管理、自动化及海外网络访问提供灵活的代理解决方案。优惠码：<strong>0205</strong>，即可减免10%。
     </td>
   </tr>
 </table>
@@ -167,7 +167,7 @@ Authorization: Bearer <auth-key>
 | `/v1/psd/generations`               | `POST`       | PSD 任务快捷入口                                     |
 | `/files/{file_path}`                | `GET`        | 公开下载随机存储路径下的生成文件                     |
 
-图片生成和编辑接口可设置 `animation: true` 或 `output_format: "gif"` 请求动图；可选 `frame_count`（2–64）与 `frame_duration_ms`（20–2000，10 毫秒的倍数）。系统通过提示词向上游请求动图，并在返回多帧 GIF 后按需调整；上游未返回动图时请求会失败。该能力依赖上游实际支持，Codex 图片链路未验证。
+图片接口的 `output_format` 支持 `gif`、`png`、`jpg` / `jpeg` 和 `webp`。GIF 可用模型由设置页控制；可选帧数和帧时长会作为提示传递给上游，GIF 原始字节不会被重采样。实际动图生成依赖上游能力。
 
 文件任务的创建、查询和删除按 API Key 隔离；任务返回的 `/files/...` 链接与生成图片一样无需鉴权，持有链接即可下载。公开下载会校验路径及文件类型，拒绝路径穿越。
 

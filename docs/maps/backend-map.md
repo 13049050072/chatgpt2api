@@ -32,11 +32,21 @@ Conversation endpoint. Codex source accounts are not selected for ordinary text
 replies. Chat model discovery and editing are not exposed in Settings.
 
 `utils.helper.WEB_IMAGE_MODELS` owns the built-in Web image identifiers:
-`gpt-image-2`, `gpt-image-2.5`, `gpt-image-2.5-flare`,
-`gpt-image-2.5-sunburst`, `gpt-image-2.6-flare`, and
-`gpt-image-2.6-sunburst`. Model validation and `ModelCatalogService` consume this
-list; Studio consumes the backend catalog. Explicit catalog configuration still
-takes precedence over the built-in list. No `exact` aliases are added.
+`gpt-image-2`, the gpt-image-2.5 aliases, and the
+`gpt-image-2.6`, `gpt-image-2.6-flare`, and `gpt-image-2.6-sunburst` aliases.
+The three 2.6 aliases use the existing `auto` upstream Web slug. Model
+validation and `ModelCatalogService` consume this list; Studio consumes the
+backend catalog. Explicit catalog configuration still takes precedence over
+the built-in list. No `exact` aliases are added.
+
+The persisted `gif_models` setting controls GIF eligibility per image model.
+It defaults to the three 2.6 aliases and is projected through `/api/settings`.
+Image requests carry optional `output_format`, `frame_count`, and
+`frame_duration_ms` values through the shared image execution request.
+`output_format` accepts `gif`, `png`, `jpg`/`jpeg`, and `webp`. GIF bytes bypass
+raster upscaling/re-encoding and are stored with `.gif` and `image/gif`; the
+other explicit formats are converted locally before storage. Existing `n` and
+multi-image behavior is unchanged.
 
 The 2.5 and 2.6 identifiers use the existing `auto` upstream Web model slug. They are
 compatibility names and do not force a particular official API image engine or
