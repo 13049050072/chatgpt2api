@@ -95,6 +95,11 @@ class CallRecordCursorMismatch(RuntimeError):
     pass
 
 
+# PostgreSQL allocates sequences at insert but exposes them at commit; appends hold this
+# advisory lock shared so cursor reads can wait for every allocated sequence to commit.
+CALL_RECORD_APPEND_LOCK_KEY = 0x63616C6C
+
+
 class CallRecordRepository:
     def __init__(self, database_url: str | None = None) -> None:
         self.database_url = database_url or resolve_database_url()
@@ -108,6 +113,19 @@ class CallRecordRepository:
                 ),
                 {"generation": uuid4().hex},
             )
+
+    @property
+    def _uses_append_lock(self) -> bool:
+        return self.engine.dialect.name == "postgresql"
+
+    def _committed_max_sequence(self) -> int:
+        with self.engine.begin() as connection:
+            if self._uses_append_lock:
+                connection.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"),
+                    {"key": CALL_RECORD_APPEND_LOCK_KEY},
+                )
+            return int(connection.scalar(select(func.max(CallRecordModel.sequence))) or 0)
 
     @staticmethod
     def _copy(payload: dict[str, Any]) -> dict[str, Any]:
@@ -131,6 +149,11 @@ class CallRecordRepository:
         payload["id"] = record_id
         session = self.Session()
         try:
+            if self._uses_append_lock:
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock_shared(:key)"),
+                    {"key": CALL_RECORD_APPEND_LOCK_KEY},
+                )
             session.add(CallRecordModel(
                 id=record_id,
                 event_time=event_time,
@@ -268,7 +291,7 @@ class CallRecordRepository:
         try:
             return {
                 "generation": self._generation(session),
-                "sequence": int(session.scalar(select(func.max(CallRecordModel.sequence))) or 0),
+                "sequence": self._committed_max_sequence(),
             }
         finally:
             session.close()
@@ -284,21 +307,19 @@ class CallRecordRepository:
                 raise CallRecordCursorMismatch("call record cursor sequence is invalid") from None
             if cursor is not None and self._clean(cursor.get("generation")) != generation:
                 raise CallRecordCursorMismatch("call record generation changed")
-            end_sequence = max(
-                start_sequence,
-                int(session.scalar(select(func.max(CallRecordModel.sequence))) or 0),
-            )
-            rows = session.scalars(
-                select(CallRecordModel)
+            end_sequence = max(start_sequence, self._committed_max_sequence())
+            rows = session.execute(
+                select(CallRecordModel.payload)
                 .where(
                     CallRecordModel.type == "call",
                     CallRecordModel.sequence > start_sequence,
                     CallRecordModel.sequence <= end_sequence,
                 )
                 .order_by(CallRecordModel.sequence.asc())
-            ).all()
+                .execution_options(yield_per=500)
+            ).scalars()
             yield (
-                (self._row_payload(row) for row in rows),
+                (dict(payload) for payload in rows if isinstance(payload, dict)),
                 {"generation": generation, "sequence": end_sequence},
             )
         finally:
@@ -347,12 +368,19 @@ class CallRecordRepository:
         session = self.Session()
         try:
             filters = (CallRecordModel.event_time < cutoff_time,)
-            rows = session.scalars(select(CallRecordModel).where(*filters)).all()
-            removed = len(rows)
-            removed_size_bytes = sum(
-                len(json.dumps(self._row_payload(row), ensure_ascii=False).encode("utf-8"))
-                for row in rows
-            )
+            removed = 0
+            removed_size_bytes = 0
+            payloads = session.execute(
+                select(CallRecordModel.payload)
+                .where(*filters)
+                .execution_options(yield_per=500)
+            ).scalars()
+            for payload in payloads:
+                removed += 1
+                removed_size_bytes += len(json.dumps(
+                    payload if isinstance(payload, dict) else {},
+                    ensure_ascii=False,
+                ).encode("utf-8"))
             kept = int(session.scalar(
                 select(func.count(CallRecordModel.sequence)).where(CallRecordModel.event_time >= cutoff_time)
             ) or 0)

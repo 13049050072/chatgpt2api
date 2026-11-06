@@ -99,6 +99,14 @@ export function useSettingsBackupRuntime(options: SettingsBackupRuntimeOptions) 
       await loadBackups()
       progressRuntime.succeed(`备份已完成：${response.result.key}`)
     } catch (error) {
+      // Without an HTTP status only the console request ended; the upload may continue.
+      if (!(error as { status?: number } | null)?.status) {
+        await loadBackups()
+        if (backupState.value?.running) {
+          progressRuntime.warn('控制台等待超时，备份仍在后台进行，完成后会出现在备份历史中')
+          return
+        }
+      }
       progressRuntime.fail(errorMessage(error, '执行备份失败'))
     } finally {
       backupBusy.value = ''

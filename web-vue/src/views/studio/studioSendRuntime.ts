@@ -11,6 +11,7 @@ import type {
   StudioReferenceImage,
 } from '@/components/studio/types'
 import type { useToast } from '@/composables/useToast'
+import { dataUrlToFile } from '@/lib/files'
 import { createStudioImageTask, runStudioSearchRequest, studioErrorMessage, studioModeRequestErrorFallback, studioModeRetryErrorFallback } from './studioRequestView'
 import type { useStudioChatStreamRuntime } from './studioChatStreamRuntime'
 import type { useStudioComposerRuntime } from './studioComposerRuntime'
@@ -52,6 +53,48 @@ export type StudioImageEditRequest = {
   imageCount?: number
 }
 
+const REQUEST_FILE_CACHE_LIMIT = 12
+const MISSING_SOURCE_IMAGES_MESSAGE = '原图没有保存在本地，请重新上传原图或重新进行局部修改后再提交'
+// Exact files of recent image requests; persisted history may only keep previews.
+const requestFilesByMessageId = new Map<string, File[]>()
+
+function rememberRequestFiles(messageId: string, files: File[]) {
+  if (!messageId || !files.length) return
+  requestFilesByMessageId.delete(messageId)
+  requestFilesByMessageId.set(messageId, files.slice())
+  while (requestFilesByMessageId.size > REQUEST_FILE_CACHE_LIMIT) {
+    const oldest = requestFilesByMessageId.keys().next().value
+    if (oldest === undefined) break
+    requestFilesByMessageId.delete(oldest)
+  }
+}
+
+function expectedRequestFileCount(message: StudioMessage) {
+  if (message.mode !== 'image') return 0
+  return message.requestFileCount ?? message.attachments?.length ?? 0
+}
+
+function referenceImageToFile(image: StudioReferenceImage) {
+  return dataUrlToFile(image.dataUrl, image.name || 'reference.png', image.type || 'image/png')
+}
+
+/** Files originally sent with an image request, or null when they cannot be rebuilt. */
+async function recoverRequestFiles(message: StudioMessage): Promise<File[] | null> {
+  const expected = expectedRequestFileCount(message)
+  if (!expected) return []
+  const cached = requestFilesByMessageId.get(message.id)
+  if (cached?.length === expected) return cached
+  const images = (message.referenceImages || []).filter((image) => image.dataUrl)
+  if (images.length !== expected) return null
+  try {
+    const files = await Promise.all(images.map(referenceImageToFile))
+    rememberRequestFiles(message.id, files)
+    return files
+  } catch {
+    return null
+  }
+}
+
 export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
   const {
     chatModel,
@@ -85,7 +128,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     const referenceImages = withReferences ? referenceRuntime.messageReferenceImages() : []
     const clearReferencesImmediately = mode === 'chat' && referenceImages.length > 0
 
-    messageRuntime.addMessage(conversation, {
+    const userMessage = messageRuntime.addMessage(conversation, {
       role: 'user',
       mode,
       content,
@@ -93,7 +136,9 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       fileKind: mode === 'file' ? composerRuntime.fileKind.value : undefined,
       attachments: withReferences && attachments.length ? attachments : undefined,
       referenceImages: buildMessageReferenceImages(referenceImages),
+      requestFileCount: mode === 'image' && files.length ? files.length : undefined,
     })
+    if (mode === 'image') rememberRequestFiles(userMessage.id, files)
     composerRuntime.composerText.value = ''
     if (clearReferencesImmediately) referenceRuntime.clear()
     await runRequestWithComposerState({
@@ -118,6 +163,11 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     if (!validateFileRequest(mode)) return
     const withReferences = mode === 'image' || mode === 'chat' || mode === 'file'
     const files = referenceRuntime.selectedFiles()
+    if (mode === 'image' && message.requestPrompt && !files.length) {
+      // The inpainting prompt and marked image only exist in the inpaint panel.
+      toast.error('局部修改请在图片上重新打开局部修改面板提交')
+      return
+    }
     const attachments = referenceRuntime.attachmentNames()
     const referenceImages = withReferences ? referenceRuntime.messageReferenceImages() : []
     const clearReferencesImmediately = mode === 'chat' && referenceImages.length > 0
@@ -130,7 +180,10 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       fileKind: mode === 'file' ? composerRuntime.fileKind.value : undefined,
       attachments: withReferences && attachments.length ? attachments : undefined,
       referenceImages: buildMessageReferenceImages(referenceImages),
+      requestPrompt: undefined,
+      requestFileCount: mode === 'image' && files.length ? files.length : undefined,
     }
+    if (mode === 'image') rememberRequestFiles(editedMessage.id, files)
 
     hooks.activeConversationId.value = conversation.id
     messageRuntime.replaceFromTarget(target, editedMessage)
@@ -159,14 +212,17 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     composerRuntime.cancelMessageEdit(false)
     composerRuntime.activateImageMode()
 
-    messageRuntime.addMessage(conversation, {
+    const userMessage = messageRuntime.addMessage(conversation, {
       role: 'user',
       mode: 'image',
       content: userContent,
       status: 'done',
       attachments: request.files.length ? request.files.map((file) => file.name).filter(Boolean) : undefined,
       referenceImages: buildMessageReferenceImages(request.referenceImages || []),
+      requestPrompt: prompt !== userContent ? prompt : undefined,
+      requestFileCount: request.files.length || undefined,
     })
+    rememberRequestFiles(userMessage.id, request.files)
 
     return runRequestWithComposerState({
       mode: 'image',
@@ -185,7 +241,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     composerRuntime.fillFromMessage(message)
   }
 
-  function editMessage(message: StudioMessage) {
+  async function editMessage(message: StudioMessage) {
     const target = messageRuntime.findMessage(message.id)
     if (!target || target.message.role !== 'user') return
     hooks.activeConversationId.value = target.conversation.id
@@ -193,6 +249,12 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     referenceRuntime.clear()
     if (target.message.mode === 'file' && (target.message.fileKind === 'psd' || target.message.referenceImages?.length)) {
       toast.error('请重新上传原图后提交文件任务')
+    }
+    if (expectedRequestFileCount(target.message)) {
+      // Inpainting prompts are built outside the composer and cannot be edited here.
+      const files = target.message.requestPrompt ? null : await recoverRequestFiles(target.message)
+      if (files?.length) await referenceRuntime.append(files)
+      else toast.error(MISSING_SOURCE_IMAGES_MESSAGE)
     }
     hooks.scheduleScrollToBottom()
   }
@@ -206,6 +268,33 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
         toast.error('请重新上传原图后提交文件任务')
         return
       }
+    }
+    if (expectedRequestFileCount(message)) {
+      const files = await recoverRequestFiles(message)
+      if (!files) {
+        fillComposerFromMessage(message)
+        toast.error(MISSING_SOURCE_IMAGES_MESSAGE)
+        return
+      }
+      if (message.requestPrompt) {
+        // Built outside the composer (e.g. inpainting): resend the same request.
+        const target = messageRuntime.findMessage(message.id)
+        const reply = target?.conversation.messages
+          .slice(target.index + 1)
+          .find((item) => item.role === 'assistant')
+        await sendImageEditRequest({
+          prompt: message.requestPrompt,
+          files,
+          userContent: message.content,
+          referenceImages: message.referenceImages,
+          assistantContent: reply?.inpaintSource ? '局部修改任务已提交' : undefined,
+          inpaintSource: reply?.inpaintSource,
+          imageCount: reply?.imageCount,
+        })
+        return
+      }
+      referenceRuntime.clear()
+      await referenceRuntime.append(files)
     }
     fillComposerFromMessage(message)
     await nextTick()
@@ -228,6 +317,14 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
 
     if (previousUserMessage.mode === 'file') referenceRuntime.clear()
 
+    // Image edits must be retried with their original images; without them the
+    // request silently becomes a text-to-image generation.
+    const files = await recoverRequestFiles(previousUserMessage)
+    if (!files) {
+      toast.error(MISSING_SOURCE_IMAGES_MESSAGE)
+      return
+    }
+
     hooks.activeConversationId.value = target.conversation.id
     messageRuntime.pruneAfterTarget(target)
     hooks.clearConversationNotice(target.conversation.id)
@@ -235,10 +332,13 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     await runRequestWithComposerState({
       mode: previousUserMessage.mode,
       conversation: target.conversation,
-      prompt: previousUserMessage.content,
-      files: [],
+      prompt: previousUserMessage.requestPrompt || previousUserMessage.content,
+      files,
       requestErrorFallback: studioModeRetryErrorFallback(previousUserMessage.mode),
       fileKind: previousUserMessage.fileKind,
+      assistantContent: message.inpaintSource ? '局部修改任务已提交' : undefined,
+      inpaintSource: message.inpaintSource,
+      imageCount: message.imageCount,
     })
   }
 

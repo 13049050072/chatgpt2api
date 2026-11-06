@@ -44,6 +44,48 @@ from utils.helper import anonymize_token
 
 _RemoteCheckMarker = tuple[str, str, str, str, bool | None, str, str]
 _CredentialGeneration = tuple[str, str, str]
+_IdentityIndexKey = tuple[str, str, str]
+
+_TOKEN_IDENTITY_CACHE_LIMIT = 8192
+_token_identity_cache: dict[str, tuple[str, str, int]] = {}
+
+
+def _token_identity(token: str) -> tuple[str, str, int]:
+    """Return the upstream account id, user id and issue time encoded in an access token."""
+    normalized = str(token or "").strip()
+    cached = _token_identity_cache.get(normalized)
+    if cached is not None:
+        return cached
+    claims = decode_access_token_payload(normalized)
+    auth = claims.get("https://api.openai.com/auth")
+    auth = auth if isinstance(auth, dict) else {}
+    try:
+        issued_at = max(0, int(claims.get("iat") or 0))
+    except (TypeError, ValueError):
+        issued_at = 0
+    identity = (
+        str(auth.get("chatgpt_account_id") or "").strip(),
+        str(auth.get("chatgpt_user_id") or claims.get("sub") or "").strip(),
+        issued_at,
+    )
+    if len(_token_identity_cache) >= _TOKEN_IDENTITY_CACHE_LIMIT:
+        _token_identity_cache.clear()
+    _token_identity_cache[normalized] = identity
+    return identity
+
+
+def _disabled_account_group_ids() -> frozenset[str]:
+    data = getattr(config, "data", None)
+    groups = data.get("account_groups") if isinstance(data, dict) else None
+    if not isinstance(groups, list):
+        return frozenset()
+    return frozenset(
+        group_id
+        for group in groups
+        if isinstance(group, dict)
+        and group.get("enabled") is False
+        and (group_id := str(group.get("id") or "").strip())
+    )
 
 
 
@@ -132,8 +174,14 @@ class AccountService:
         "invalid_grant",
         "invalid_refresh_token",
         "refresh_token_invalidated",
+        "refresh_token_expired",
+        "refresh_token_reused",
     })
-    _TERMINAL_REFRESH_MESSAGE_FRAGMENTS = ("session has ended",)
+    _TERMINAL_REFRESH_MESSAGE_FRAGMENTS = (
+        "session has ended",
+        "refresh token has expired",
+        "refresh token has already been used",
+    )
     # 刷新进度追踪
     _refresh_progress: dict[str, dict] = {}
     _refresh_progress_lock = Lock()
@@ -205,11 +253,7 @@ class AccountService:
 
     @classmethod
     def _upstream_token_identity(cls, token: str) -> tuple[str, str]:
-        claims = cls._decode_jwt_payload(token)
-        auth = claims.get("https://api.openai.com/auth")
-        auth = auth if isinstance(auth, dict) else {}
-        account_id = str(auth.get("chatgpt_account_id") or "").strip()
-        user_id = str(auth.get("chatgpt_user_id") or claims.get("sub") or "").strip()
+        account_id, user_id, _issued_at = _token_identity(token)
         return account_id, user_id
 
     @classmethod
@@ -226,6 +270,99 @@ class AccountService:
             return False
         other_user_id = other_user_id or str(candidate.get("user_id") or "").strip()
         return bool(user_id and other_user_id and user_id == other_user_id)
+
+    @classmethod
+    def _identity_index_key(
+        cls,
+        token: str,
+        source_type: object,
+        stored_user_id: object = "",
+    ) -> _IdentityIndexKey | None:
+        account_id, user_id, _issued_at = _token_identity(token)
+        source = cls._normalize_source_type(source_type)
+        if account_id:
+            return source, "account", account_id
+        user_id = user_id or str(stored_user_id or "").strip()
+        if user_id:
+            return source, "user", user_id
+        return None
+
+    def _build_identity_index_locked(self) -> dict[_IdentityIndexKey, list[str]]:
+        index: dict[_IdentityIndexKey, list[str]] = {}
+        for token, account in self._accounts.items():
+            key = self._identity_index_key(token, account.get("source_type"), account.get("user_id"))
+            if key is not None:
+                index.setdefault(key, []).append(token)
+        return index
+
+    def _reindex_identity_locked(
+        self,
+        index: dict[_IdentityIndexKey, list[str]],
+        previous_token: str,
+        previous_account: dict,
+        token: str,
+        account: dict,
+    ) -> None:
+        previous_key = self._identity_index_key(
+            previous_token,
+            previous_account.get("source_type"),
+            previous_account.get("user_id"),
+        )
+        previous_tokens = index.get(previous_key) if previous_key is not None else None
+        if previous_tokens and previous_token in previous_tokens:
+            previous_tokens.remove(previous_token)
+        key = self._identity_index_key(token, account.get("source_type"), account.get("user_id"))
+        if key is not None:
+            tokens = index.setdefault(key, [])
+            if token not in tokens:
+                tokens.append(token)
+
+    def _find_identity_match_locked(
+        self,
+        index: dict[_IdentityIndexKey, list[str]],
+        access_token: str,
+        source_type: object,
+    ) -> str:
+        """Find the same upstream account from the same credential source."""
+        key = self._identity_index_key(access_token, source_type)
+        if key is None:
+            return ""
+        _account_id, user_id, _issued_at = _token_identity(access_token)
+        for token in index.get(key, ()):
+            candidate = self._accounts.get(token)
+            if token == access_token or candidate is None:
+                continue
+            if self._normalize_source_type(candidate.get("source_type")) != key[0]:
+                continue
+            if key[1] == "account":
+                _other_account_id, other_user_id, _other_issued_at = _token_identity(token)
+                if user_id and other_user_id and user_id != other_user_id:
+                    continue
+            return token
+        return ""
+
+    @staticmethod
+    def _issued_before(token: str, other_token: str) -> bool:
+        issued_at = _token_identity(token)[2]
+        other_issued_at = _token_identity(other_token)[2]
+        return bool(issued_at and other_issued_at and issued_at < other_issued_at)
+
+    @staticmethod
+    def _older_login_may_replace(current: dict | None, payload: dict) -> bool:
+        """Whether credentials from an earlier login may replace the stored ones.
+
+        Only when upstream already rejected them: the access token failed its
+        remote check, or the refresh token is dead and the payload brings another.
+        """
+        item = current or {}
+        if item.get("last_remote_check_result") == "invalid":
+            return True
+        incoming_refresh_token = str(payload.get("refresh_token") or "").strip()
+        return bool(
+            item.get("refresh_token_invalid_at")
+            and incoming_refresh_token
+            and incoming_refresh_token != str(item.get("refresh_token") or "").strip()
+        )
 
     @staticmethod
     def _management_id_for_token(access_token: str) -> str:
@@ -835,6 +972,9 @@ class AccountService:
         allowed_statuses = {"正常", "限流"} if allow_limited else {"正常"}
         if account.get("status") not in allowed_statuses:
             return False
+        group_id = str(account.get("group_id") or "").strip()
+        if group_id and group_id in _disabled_account_group_ids():
+            return False
         credential_availability = project_upstream_credential_availability(
             str(account.get("access_token") or ""),
             str(account.get("refresh_token") or ""),
@@ -1285,8 +1425,7 @@ class AccountService:
                 or persisted.get("last_token_refresh_error_at") != now
             ):
                 return False
-        log_service.add(
-            LOG_TYPE_ACCOUNT,
+        self._add_account_log_best_effort(
             "refresh_token 刷新 access_token 失败",
             {
                 "source": event,
@@ -1322,6 +1461,24 @@ class AccountService:
             return False
         return (datetime.now(timezone.utc) - last_error_at).total_seconds() < self._TOKEN_REFRESH_ERROR_BACKOFF_SECONDS
 
+    @classmethod
+    def _oauth_client_id_for(cls, account: dict | None) -> str:
+        """Refresh tokens are bound to the OAuth client that issued them.
+
+        The id_token arrives with the refresh token, so its audience wins over the
+        access token, which a later import may have replaced on its own.
+        """
+        item = account or {}
+        for field, claim in (("id_token", "aud"), ("access_token", "client_id")):
+            token = str(item.get(field) or "").strip()
+            claims = decode_access_token_payload(token) if token else {}
+            values = claims.get(claim) if isinstance(claims, dict) else None
+            for value in values if isinstance(values, list) else [values]:
+                candidate = str(value or "").strip()
+                if candidate.startswith("app_"):
+                    return candidate
+        return cls._OAUTH_CLIENT_ID
+
     def _request_access_token_refresh(
         self,
         refresh_token: str,
@@ -1345,7 +1502,7 @@ class AccountService:
                     data={
                         "grant_type": "refresh_token",
                         "refresh_token": refresh_token,
-                        "client_id": self._OAUTH_CLIENT_ID,
+                        "client_id": self._oauth_client_id_for(account),
                     },
                     timeout=60,
                 )
@@ -1565,8 +1722,7 @@ class AccountService:
                 )
             self._image_slot_condition.notify_all()
 
-        log_service.add(
-            LOG_TYPE_ACCOUNT,
+        self._add_account_log_best_effort(
             "refresh_token 已刷新 access_token",
             {"source": event, "token": anonymize_token(new_token), "rotated": rotated},
         )
@@ -1679,6 +1835,7 @@ class AccountService:
                             raise RefreshCredentialsChangedError()
                         continue
                     image_busy = int(self._image_inflight.get(current_token, 0)) > 1
+                    refresh_backoff = not force and self._recent_token_refresh_error(current)
                     with self._oauth_refresh_flights_lock:
                         future = self._oauth_refresh_flights.get(key)
                         owner = future is None
@@ -1688,14 +1845,27 @@ class AccountService:
                             future = Future()
                             self._oauth_refresh_flights[key] = future
             else:
-                with self._oauth_refresh_flights_lock:
-                    future = self._oauth_refresh_flights.get(key)
-                    owner = future is None
-                    if future is None:
-                        if not needs_refresh or refresh_backoff:
-                            return active_token
-                        future = Future()
-                        self._oauth_refresh_flights[key] = future
+                # Re-check under the account lock: a refresh that finished after the
+                # snapshot already consumed this refresh token.
+                with self._image_slot_condition:
+                    current_token = self._resolve_access_token_locked(active_token)
+                    current = self._accounts.get(current_token)
+                    if not current or self._credential_generation(current_token, current) != key:
+                        if expected_credentials is not None or not current:
+                            raise RefreshCredentialsChangedError()
+                        if credential_attempt == 0:
+                            continue
+                        return str(current.get("access_token") or current_token)
+                    # A failed refresh leaves the generation unchanged; read its backoff here.
+                    refresh_backoff = not force and self._recent_token_refresh_error(current)
+                    with self._oauth_refresh_flights_lock:
+                        future = self._oauth_refresh_flights.get(key)
+                        owner = future is None
+                        if future is None:
+                            if not needs_refresh or refresh_backoff:
+                                return active_token
+                            future = Future()
+                            self._oauth_refresh_flights[key] = future
             if owner:
                 try:
                     result = self._refresh_access_token_owner(
@@ -1990,11 +2160,14 @@ class AccountService:
         会有上游波动等可重试失败混入，不能仅凭限流就下终结性结论。
         """
         excluded = set(excluded_tokens or set())
+        disabled_groups = _disabled_account_group_ids()
         matched = 0
         limited = 0
         for item in self._accounts.values():
             token = item.get("access_token") or ""
             if not token or token in excluded:
+                continue
+            if str(item.get("group_id") or "").strip() in disabled_groups:
                 continue
             if not (
                 self._account_matches_plan_type(item, plan_type)
@@ -2256,8 +2429,12 @@ class AccountService:
             account = self._accounts.get(access_token)
             return dict(account) if account else None
 
-    def get_account_by_token_identity(self, access_token: str) -> dict | None:
-        """Resolve a current account from either its current or a rotated access token."""
+    def get_account_by_token_identity(self, access_token: str, source_type: str | None = None) -> dict | None:
+        """Resolve a current account from either its current or a rotated access token.
+
+        Web and Codex credentials of one upstream user are separate accounts, so the
+        identity fallback only matches accounts of ``source_type`` when it is given.
+        """
         token = str(access_token or "").strip()
         if not token:
             return None
@@ -2269,11 +2446,15 @@ class AccountService:
                 return dict(account)
 
             fingerprint = self._access_token_fingerprint(token)
-            for candidate in self._accounts.values():
+            candidates = [
+                candidate for candidate in self._accounts.values()
+                if self._account_matches_source_type(candidate, source_type)
+            ]
+            for candidate in candidates:
                 fingerprints = candidate.get("access_token_fingerprints")
                 if isinstance(fingerprints, list) and fingerprint in fingerprints:
                     return dict(candidate)
-            for candidate in self._accounts.values():
+            for candidate in candidates:
                 if self._same_upstream_identity(token, candidate):
                     return dict(candidate)
         return None
@@ -2436,8 +2617,7 @@ class AccountService:
         result = self.delete_accounts(target_tokens, return_items=False) if target_tokens else {"removed": 0}
         removed = int(result.get("removed") or 0)
         if removed:
-            log_service.add(
-                LOG_TYPE_ACCOUNT,
+            self._add_account_log_best_effort(
                 "按账号自动移除策略清理账号",
                 {
                     "removed": removed,
@@ -2652,6 +2832,9 @@ class AccountService:
                 if updated_refresh_token != current_refresh_token
                 else current.get("refresh_token_invalid_at") or None
             )
+        if updated_refresh_token != current_refresh_token and "id_token" not in normalized:
+            # The stored id_token came with the replaced grant and names its client.
+            normalized["id_token"] = ""
         return normalized
 
     @staticmethod
@@ -2757,7 +2940,7 @@ class AccountService:
     def add_accounts(self, tokens: list[str], source_type: str = "web", return_items: bool = True) -> dict:
         tokens = list(dict.fromkeys(token for token in tokens if token))
         if not tokens:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts() if return_items else []}
+            return {"added": 0, "updated": 0, "skipped": 0, "items": self.list_accounts() if return_items else []}
         return self._add_account_payloads([
             {"access_token": token, "source_type": self._normalize_source_type(source_type)}
             for token in tokens
@@ -2835,6 +3018,7 @@ class AccountService:
         if not deduped:
             result = {
                 "added": 0,
+                "updated": 0,
                 "skipped": 0,
                 "items": self.list_accounts() if return_items else [],
             }
@@ -2844,6 +3028,7 @@ class AccountService:
 
         with self._lock:
             added = 0
+            updated = 0
             skipped = len(input_tokens) - len(deduped)
             rotations: list[tuple[str, str]] = []
             outcomes_by_token: dict[str, str] = {}
@@ -2860,29 +3045,46 @@ class AccountService:
                     token,
                 )
             }
+            identity_index = {} if preserve_lifecycle else self._build_identity_index_locked()
             for access_token, payload in deduped.items():
-                resolved_token = self._resolve_access_token_locked(access_token)
                 current = self._accounts.get(access_token)
                 old_token = access_token
                 if current is None:
+                    resolved_token = self._resolve_access_token_locked(access_token)
                     fingerprint = self._access_token_fingerprint(access_token)
-                    old_token = (
-                        resolved_token if resolved_token in self._accounts
-                        else token_fingerprint_owners.get(fingerprint, "")
-                    )
-                    if not old_token and not preserve_lifecycle:
-                        old_token = next((
-                            token for token, candidate in self._accounts.items()
-                            if self._same_upstream_identity(access_token, candidate)
-                        ), "")
-                    current = self._accounts.get(old_token)
+                    if (
+                        (resolved_token != access_token and resolved_token in self._accounts)
+                        or fingerprint in token_fingerprint_owners
+                    ):
+                        # A token the account already rotated away from (alias or
+                        # persisted fingerprint) must not replace newer credentials.
+                        skipped += 1
+                        outcomes_by_token[access_token] = "stale"
+                        continue
+                    if not preserve_lifecycle:
+                        matched_token = self._find_identity_match_locked(
+                            identity_index,
+                            access_token,
+                            payload.get("source_type"),
+                        )
+                        if (
+                            matched_token
+                            and self._issued_before(access_token, matched_token)
+                            and not self._older_login_may_replace(self._accounts.get(matched_token), payload)
+                        ):
+                            skipped += 1
+                            outcomes_by_token[access_token] = "stale"
+                            continue
+                        if matched_token:
+                            old_token = matched_token
+                            current = self._accounts.get(matched_token)
+                previous_credentials: tuple[str, str] | None = None
                 if current is None:
                     added += 1
                     outcomes_by_token[access_token] = "added"
                     current = {"created_at": self._now()}
                 else:
-                    skipped += 1
-                    outcomes_by_token[access_token] = "skipped"
+                    previous_credentials = (old_token, str(current.get("refresh_token") or "").strip())
                 incoming = self._refresh_token_aware_updates(
                     current,
                     payload,
@@ -2908,6 +3110,16 @@ class AccountService:
                 current_type = self._normalize_account_type(current.get("type"))
                 merged["type"] = incoming_type or current_type
                 account = self._normalize_account(merged)
+                if previous_credentials is not None:
+                    if account is not None and (
+                        access_token,
+                        str(account.get("refresh_token") or "").strip(),
+                    ) != previous_credentials:
+                        updated += 1
+                        outcomes_by_token[access_token] = "updated"
+                    else:
+                        skipped += 1
+                        outcomes_by_token[access_token] = "skipped"
                 if account is not None:
                     previous_management_id = str(
                         current.get("management_id") or ""
@@ -2929,6 +3141,14 @@ class AccountService:
                             if owner == old_token:
                                 token_fingerprint_owners[fingerprint] = access_token
                     self._accounts[access_token] = account
+                    if not preserve_lifecycle:
+                        self._reindex_identity_locked(
+                            identity_index,
+                            old_token,
+                            current,
+                            access_token,
+                            account,
+                        )
                     if (
                         previous_management_id
                         and previous_management_id != account["management_id"]
@@ -2942,12 +3162,20 @@ class AccountService:
             self._save_accounts(
                 conflict_existing_tokens=conflict_existing_tokens,
             )
+            token_by_management_id = {
+                str(account.get("management_id") or ""): token
+                for token, account in self._accounts.items()
+            } if rotations else {}
+            # Each rotation only redirects aliases that resolve to its own old token,
+            # so one pass over the aliases serves every rotation.
+            alias_sources: dict[str, set[str]] = {}
+            if rotations:
+                for source in self._token_aliases:
+                    alias_sources.setdefault(self._resolve_access_token_locked(source), set()).add(source)
             for old_token, management_id in rotations:
-                final_token = next((token for token, account in self._accounts.items()
-                                    if account.get("management_id") == management_id), "")
+                final_token = token_by_management_id.get(management_id, "")
                 if final_token:
-                    sources = {source for source in {old_token, *self._token_aliases}
-                               if source == old_token or self._resolve_access_token_locked(source) == old_token}
+                    sources = {old_token, *alias_sources.get(old_token, ())}
                     self._token_aliases.pop(final_token, None)
                     self._move_account_runtime_token_locked(final_token, sources)
                 else:
@@ -2964,9 +3192,11 @@ class AccountService:
                 self._cumulative_total += added
                 self._save_cumulative_total()
             items = [dict(item) for item in self._accounts.values()] if return_items else []
-            log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
-                            {"added": added, "skipped": skipped})
-        result = {"added": added, "skipped": skipped, "items": items}
+        self._add_account_log_best_effort(
+            f"新增 {added} 个账号，更新凭据 {updated} 个，跳过 {skipped} 个",
+            {"added": added, "updated": updated, "skipped": skipped},
+        )
+        result = {"added": added, "updated": updated, "skipped": skipped, "items": items}
         if return_item_results:
             seen_tokens: set[str] = set()
             item_results: list[str] = []
@@ -3407,8 +3637,7 @@ class AccountService:
                 if not saved:
                     return None
                 self._remove_account_runtime_state_locked({access_token})
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
+                self._add_account_log_best_effort(
                     auto_remove_message,
                     {"token": anonymize_token(access_token)},
                 )
@@ -3436,7 +3665,7 @@ class AccountService:
             if persisted is None:
                 return None
             if not quiet:
-                log_service.add(LOG_TYPE_ACCOUNT, "更新账号",
+                self._add_account_log_best_effort("更新账号",
                                 {"token": anonymize_token(access_token), "status": persisted.get("status")})
             return dict(persisted)
         return None
@@ -3658,8 +3887,7 @@ class AccountService:
                 access_token=access_token,
             )
             if not terminal_already_recorded:
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
+                self._add_account_log_best_effort(
                     "账号鉴权确认失效" if final_status == "异常" else "已禁用账号鉴权确认失效",
                     {
                         "source": event,
@@ -3669,9 +3897,8 @@ class AccountService:
                     },
                 )
             if removed:
-                log_service.add(LOG_TYPE_ACCOUNT, "删除 1 个账号", {"removed": 1})
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
+                self._add_account_log_best_effort("删除 1 个账号", {"removed": 1})
+                self._add_account_log_best_effort(
                     "自动移除异常账号",
                     {
                         "source": event,
@@ -3951,9 +4178,10 @@ class AccountService:
         reschedule_pending(initial_token)
 
     def _refresh_account_after_image_failure(self, access_token: str) -> None:
+        event = "account_failure"
         try:
             account = self.get_account(access_token) or {}
-            event = str(account.get("last_remote_check_event") or "account_failure")
+            event = str(account.get("last_remote_check_event") or event)
             if account.get("last_remote_check_result") == "pending":
                 if account.get("pending_auth_scope") == "image":
                     self._verify_pending_auth(access_token, event)
@@ -3963,8 +4191,17 @@ class AccountService:
                 self.fetch_remote_info(access_token, event)
         except Exception as exc:
             account = self.get_account(access_token)
-            log_service.add(
-                LOG_TYPE_ACCOUNT,
+            if account and account.get("last_remote_check_result") == "pending":
+                # A pending marker excludes the account from every pool, so settle it.
+                try:
+                    self._record_remote_check_error(
+                        access_token,
+                        event,
+                        self._credential_error_text(exc, account, access_token=access_token),
+                    )
+                except Exception:
+                    pass
+            self._add_account_log_best_effort(
                 "鉴权失败后核验账号失败",
                 {
                     "token": anonymize_token(access_token),
@@ -4117,8 +4354,7 @@ class AccountService:
                     expected_refresh_token=expected_refresh_token,
                     expected_remote_check_marker=expected_remote_check_marker,
                 )
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
+                self._add_account_log_best_effort(
                     "image failure refresh scheduling failed",
                     {
                         "token": anonymize_token(access_token),
@@ -4141,6 +4377,7 @@ class AccountService:
         expected_access_token: str | None = None,
         expected_refresh_token: str | None = None,
         expected_last_token_refresh_at: str | None = None,
+        release_slot: bool = True,
     ) -> dict | None:
         # Retained as call metadata only; capability-specific account state is gone.
         _ = capabilities
@@ -4151,7 +4388,9 @@ class AccountService:
         consumed_quota = success if quota_consumed is None else bool(quota_consumed)
         with self._image_slot_condition:
             access_token = self._resolve_access_token_locked(access_token)
-            self._release_image_slot_locked(access_token)
+            # Released before any fallible work so callers must never release again.
+            if release_slot:
+                self._release_image_slot_locked(access_token)
             try:
                 current = self._accounts.get(access_token)
                 if current is None:
@@ -4249,7 +4488,12 @@ class AccountService:
             refresh_kwargs = {"event": f"{event}:preflight"}
             if image_scope:
                 refresh_kwargs["image_scope"] = True
-            active_token = self.ensure_access_token(access_token, **refresh_kwargs)
+            try:
+                active_token = self.ensure_access_token(access_token, **refresh_kwargs)
+            except (TerminalRefreshTokenError, RefreshCredentialsChangedError):
+                # The refresh outcome is already recorded; the remote check below still
+                # has to settle whether the current access token works.
+                active_token = self.resolve_access_token(access_token) or access_token
         else:
             active_token = self.resolve_access_token(access_token) or access_token
         from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI

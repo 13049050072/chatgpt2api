@@ -9,8 +9,13 @@ import {
   type AuthView,
 } from '@/api/auth'
 import { getAuthToken } from '@/api/client'
+import { setPreferenceScope } from '@/lib/preferences'
 
 const AUTH_CACHE_MS = 60000
+
+function isUnauthorizedError(error: unknown) {
+  return Boolean(error && typeof error === 'object' && (error as { status?: number }).status === 401)
+}
 
 function emptyCapabilities(): AuthCapabilities {
   return { admin_console: false, studio: false }
@@ -25,6 +30,7 @@ export const useAuthStore = defineStore('auth', () => {
   const version = ref('')
   const lastCheckedAt = ref(0)
   let checkPromise: Promise<boolean> | null = null
+  let sessionGeneration = 0
 
   const role = computed(() => subject.value?.role || '')
   const subjectId = computed(() => subject.value?.id || '')
@@ -41,6 +47,12 @@ export const useAuthStore = defineStore('auth', () => {
       version.value = status.version
       return false
     }
+    const previousSubjectId = subject.value?.id
+    if (previousSubjectId && previousSubjectId !== status.subject.id) {
+      // Another tab switched keys; in-memory state still belongs to the old subject.
+      window.location.reload()
+      return false
+    }
     isLoggedIn.value = true
     subject.value = status.subject
     capabilities.value = {
@@ -49,6 +61,7 @@ export const useAuthStore = defineStore('auth', () => {
     }
     homeRoute.value = status.home_route
     version.value = status.version
+    setPreferenceScope(status.subject.id, { claimLegacy: status.subject.role === 'admin' })
     return true
   }
 
@@ -57,9 +70,11 @@ export const useAuthStore = defineStore('auth', () => {
     subject.value = null
     capabilities.value = emptyCapabilities()
     homeRoute.value = '/login'
+    setPreferenceScope('')
   }
 
   async function login(password: string) {
+    sessionGeneration += 1
     isLoading.value = true
     try {
       const status = await authApi.login({ password })
@@ -75,6 +90,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function logout() {
+    sessionGeneration += 1
     try {
       await authApi.logout()
     } finally {
@@ -97,21 +113,28 @@ export const useAuthStore = defineStore('auth', () => {
     if (checkPromise) {
       return checkPromise
     }
-    try {
-      checkPromise = (async () => {
+    const generation = sessionGeneration
+    // Shared by concurrent callers, so it resolves instead of rejecting.
+    checkPromise = (async () => {
+      try {
         const status = await authApi.checkAuth()
+        // A check that started before logout or login must not apply its result.
+        if (generation !== sessionGeneration || !getAuthToken()) return isLoggedIn.value
         const authenticated = applyStatus(status)
         lastCheckedAt.value = Date.now()
         return authenticated
-      })()
-      return await checkPromise
-    } catch {
-      clearIdentity()
-      lastCheckedAt.value = 0
-      return false
-    } finally {
-      checkPromise = null
-    }
+      } catch (error) {
+        // Timeouts, resets and 5xx say nothing about the key; only 401 ends the session.
+        if (generation === sessionGeneration && isUnauthorizedError(error)) {
+          clearIdentity()
+        }
+        lastCheckedAt.value = 0
+        return isLoggedIn.value
+      } finally {
+        checkPromise = null
+      }
+    })()
+    return checkPromise
   }
 
   return {

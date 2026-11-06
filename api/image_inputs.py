@@ -12,7 +12,8 @@ from pathlib import PurePosixPath
 from typing import Any, TypeGuard
 from urllib.parse import ParseResult, unquote, unquote_to_bytes, urljoin, urlparse
 
-from curl_cffi import CurlOpt, requests
+from curl_cffi import Curl, CurlError, CurlOpt, requests
+from curl_cffi._wrapper import ffi, lib
 from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
@@ -322,23 +323,101 @@ def _validate_public_image_url(source: str) -> tuple[ParseResult, tuple[str, ...
     return parsed, tuple(dict.fromkeys(addresses))
 
 
+def _pinned_addresses(parsed: ParseResult, addresses: tuple[str, ...]) -> tuple[int, list[str]] | None:
+    """Port and bracketed addresses (IPv4 first) to pin, or None for IP-literal hosts."""
+    try:
+        ipaddress.ip_address((parsed.hostname or "").rstrip("."))
+        return None
+    except ValueError:
+        pass
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    ordered = sorted(addresses, key=lambda item: ":" in item)
+    return port, [f"[{item}]" if ":" in item else item for item in ordered]
+
+
 def _image_fetch_curl_options(parsed: ParseResult, addresses: tuple[str, ...]) -> dict[CurlOpt, object]:
     """Pin the connection to the public addresses validated for this hop."""
-    hostname = parsed.hostname or ""
-    try:
-        ipaddress.ip_address(hostname.rstrip("."))
-    except ValueError:
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        resolved = [
-            f"{hostname}:{port}:{f'[{address}]' if ':' in address else address}"
-            for address in addresses
-        ]
-    else:
-        resolved = []
     options: dict[CurlOpt, object] = {CurlOpt.NOPROXY: "*"}
-    if resolved:
-        options[CurlOpt.RESOLVE] = resolved
+    pinned = _pinned_addresses(parsed, addresses)
+    if pinned is not None:
+        # Wildcard host: libcurl matches its own form of the name (trailing dot,
+        # punycode), which a hostname entry would miss. Each hop has its own handle.
+        port, targets = pinned
+        options[CurlOpt.RESOLVE] = [f"*:{port}:{','.join(targets)}"]
     return options
+
+
+class _ConnectToCurl(Curl):
+    """Curl handle that can carry CURLOPT_CONNECT_TO.
+
+    curl_cffi only builds slists for headers and RESOLVE, so this handle owns
+    the CONNECT_TO slist and keeps it alive across the streamed duplicate.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._connect_to = ffi.NULL
+
+    def setopt(self, option: CurlOpt, value: Any) -> int:
+        if option != CurlOpt.CONNECT_TO:
+            return super().setopt(option, value)
+        if self._curl is None:
+            return 0
+        for entry in value:
+            self._connect_to = lib.curl_slist_append(self._connect_to, str(entry).encode())
+        ret = lib._curl_easy_setopt(self._curl, option, self._connect_to)
+        self._check_error(ret, "setopt", option, value)
+        return ret
+
+    def duphandle(self) -> "_ConnectToCurl":
+        if self._curl is None:
+            raise CurlError("Cannot duplicate closed handle.")
+        return _ConnectToCurl(
+            cacert=self._cacert,
+            debug=self._debug,
+            handle=lib.curl_easy_duphandle(self._curl),
+        )
+
+    def _free_connect_to(self) -> None:
+        if self._connect_to != ffi.NULL:
+            lib.curl_slist_free_all(self._connect_to)
+            self._connect_to = ffi.NULL
+
+    def reset(self) -> None:
+        super().reset()
+        self._free_connect_to()
+
+    def close(self) -> None:
+        super().close()
+        self._free_connect_to()
+
+
+def _proxied_image_fetch_curl_options(
+        parsed: ParseResult,
+        addresses: tuple[str, ...],
+        proxy_url: str,
+) -> dict[CurlOpt, object]:
+    """Make the proxy tunnel to the validated address instead of re-resolving the host."""
+    pinned = _pinned_addresses(parsed, addresses)
+    if pinned is None:
+        return {}
+    port, targets = pinned
+    # Empty host and port match whatever form libcurl gives the name; the session
+    # serves a single hop, so the wildcard cannot leak to other requests.
+    options: dict[CurlOpt, object] = {CurlOpt.CONNECT_TO: [f"::{targets[0]}:{port}"]}
+    if urlparse(proxy_url).scheme.lower() in {"http", "https"}:
+        # Plain-http targets are otherwise sent to the proxy as absolute URLs.
+        options[CurlOpt.HTTPPROXYTUNNEL] = 1
+    return options
+
+
+def _close_session_quietly(session: Any) -> None:
+    if session is None:
+        return
+    try:
+        session.close()
+    except Exception:
+        pass
 
 
 def _read_response_limited(response: requests.Response, *, max_bytes: int = MAX_IMAGE_REFERENCE_BYTES) -> bytes:
@@ -393,6 +472,7 @@ def _download_image_url(
     for redirect_count in range(MAX_IMAGE_REDIRECTS + 1):
         parsed, addresses = _validate_public_image_url(current)
         acquired = False
+        session: requests.Session | None = None
         try:
             acquired = _IMAGE_FETCH_SLOTS.acquire(timeout=60)
             if not acquired:
@@ -405,17 +485,25 @@ def _download_image_url(
             }
             egress = proxy_settings.build_session_kwargs() if use_egress_proxy else {}
             if egress.get("proxy"):
-                # The proxy opens the public URL. Keep redirect checks, but do
-                # not pin DNS or disable the proxy.
+                # The proxy resolves the hostname again; pin its tunnel target to the
+                # validated address so DNS rebinding cannot reach the proxy's network.
                 request_kwargs.update(egress)
+                session = requests.Session(
+                    curl=_ConnectToCurl(),
+                    use_thread_local_curl=False,
+                    curl_options=_proxied_image_fetch_curl_options(parsed, addresses, str(egress["proxy"])),
+                )
+                response = session.get(current, **request_kwargs)
             else:
                 request_kwargs["curl_options"] = _image_fetch_curl_options(parsed, addresses)
-            response = requests.get(current, **request_kwargs)
+                response = requests.get(current, **request_kwargs)
         except HTTPException:
+            _close_session_quietly(session)
             if acquired:
                 _IMAGE_FETCH_SLOTS.release()
             raise
         except Exception as exc:
+            _close_session_quietly(session)
             if acquired:
                 _IMAGE_FETCH_SLOTS.release()
             raise HTTPException(status_code=400, detail={"error": f"image_url fetch failed: {exc}"}) from exc
@@ -444,6 +532,7 @@ def _download_image_url(
                 if callable(close):
                     close()
             finally:
+                _close_session_quietly(session)
                 _IMAGE_FETCH_SLOTS.release()
     raise HTTPException(status_code=400, detail={"error": "image_url has too many redirects"})
 

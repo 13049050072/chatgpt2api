@@ -26,6 +26,18 @@ export const preferenceKeys = {
 
 type PreferenceKey = typeof preferenceKeys[keyof typeof preferenceKeys]
 
+// Conversation history and task ids belong to one signed-in key, never to the browser.
+const userScopedKeys: ReadonlySet<PreferenceKey> = new Set([
+  preferenceKeys.imageTaskLocalIds,
+  preferenceKeys.imageTaskConversations,
+  preferenceKeys.imageTaskActiveConversationId,
+  preferenceKeys.studioActiveConversationId,
+  preferenceKeys.studioConversationBadges,
+  preferenceKeys.studioConversations,
+])
+
+let preferenceScope = ''
+
 function storage(): Storage | null {
   if (typeof window === 'undefined') return null
   try {
@@ -35,13 +47,56 @@ function storage(): Storage | null {
   }
 }
 
-export function getStringPreference(key: PreferenceKey, fallback = ''): string {
-  const value = storage()?.getItem(key)
-  return value == null ? fallback : value
+export function setPreferenceScope(scope: string, options: { claimLegacy?: boolean } = {}): void {
+  preferenceScope = encodeURIComponent(scope.trim())
+  if (!preferenceScope || !options.claimLegacy) return
+  const store = storage()
+  if (!store) return
+  for (const key of userScopedKeys) {
+    try {
+      const legacy = store.getItem(key)
+      const scopedKey = `${key}:${preferenceScope}`
+      if (legacy == null || store.getItem(scopedKey) != null) continue
+      // Remove first: a full storage has room for the same value once it is freed.
+      store.removeItem(key)
+      if (!writeStoredValue(scopedKey, legacy)) writeStoredValue(key, legacy)
+    } catch {
+      // Leave legacy data in place when it cannot be moved.
+    }
+  }
 }
 
-export function setStringPreference(key: PreferenceKey, value: string): void {
-  storage()?.setItem(key, value)
+export function preferenceStorageKey(key: PreferenceKey): string | null {
+  if (!userScopedKeys.has(key)) return key
+  return preferenceScope ? `${key}:${preferenceScope}` : null
+}
+
+export function readStoredValue(storageKey: string | null): string | null {
+  if (!storageKey) return null
+  try {
+    return storage()?.getItem(storageKey) ?? null
+  } catch {
+    return null
+  }
+}
+
+export function writeStoredValue(storageKey: string | null, value: string): boolean {
+  const store = storage()
+  if (!storageKey || !store) return false
+  try {
+    store.setItem(storageKey, value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function getStringPreference(key: PreferenceKey, fallback = ''): string {
+  return readStoredValue(preferenceStorageKey(key)) ?? fallback
+}
+
+export function setStringPreference(key: PreferenceKey, value: string): boolean {
+  return writeStoredValue(preferenceStorageKey(key), value)
 }
 
 export function getBooleanPreference(key: PreferenceKey, fallback = false): boolean {
@@ -82,10 +137,16 @@ export function getJsonPreference<T>(key: PreferenceKey, fallback: T): T {
   }
 }
 
-export function setJsonPreference(key: PreferenceKey, value: unknown): void {
-  setStringPreference(key, JSON.stringify(value))
+export function setJsonPreference(key: PreferenceKey, value: unknown): boolean {
+  return setStringPreference(key, JSON.stringify(value))
 }
 
 export function removePreference(key: PreferenceKey): void {
-  storage()?.removeItem(key)
+  const storageKey = preferenceStorageKey(key)
+  if (!storageKey) return
+  try {
+    storage()?.removeItem(storageKey)
+  } catch {
+    // Storage can be unavailable in private browsing modes.
+  }
 }

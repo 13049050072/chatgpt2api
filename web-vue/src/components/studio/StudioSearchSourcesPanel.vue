@@ -9,18 +9,18 @@
 
     <div ref="sourceListRef" class="studio-search-sources-list custom-scrollbar">
       <component
-        :is="view.source.url ? 'a' : 'div'"
+        :is="view.url ? 'a' : 'div'"
         v-for="view in sourceViews"
         :key="`${message.id}-source-${view.index}`"
         :data-source-index="view.index"
         class="studio-search-source-card"
         :class="{
-          'is-static': !view.source.url,
+          'is-static': !view.url,
           'is-highlighted': highlightedSourceIndex === view.index,
         }"
-        :href="view.source.url || undefined"
-        :target="view.source.url ? '_blank' : undefined"
-        :rel="view.source.url ? 'noreferrer' : undefined"
+        :href="view.url || undefined"
+        :target="view.url ? '_blank' : undefined"
+        :rel="view.url ? 'noreferrer' : undefined"
       >
         <span class="studio-search-source-index">{{ view.index + 1 }}</span>
         <span class="studio-search-source-body">
@@ -29,7 +29,7 @@
           <em v-if="view.source.snippet">{{ view.source.snippet }}</em>
         </span>
         <Icon
-          v-if="view.source.url"
+          v-if="view.url"
           icon="lucide:external-link"
           class="studio-search-source-open h-3.5 w-3.5"
         />
@@ -42,6 +42,7 @@
 import { Icon } from '@iconify/vue'
 import { computed, nextTick, ref, watch } from 'vue'
 import ModalHeader from '@/components/ai/ModalHeader.vue'
+import { safeExternalUrl } from '@/lib/externalUrl'
 import type { StudioMessage, StudioSearchSource } from './types'
 
 const props = defineProps<{
@@ -58,6 +59,7 @@ const sourceListRef = ref<HTMLElement | null>(null)
 const sourceViews = computed(() => (props.message.searchSources || []).map((source, index) => ({
   source,
   index,
+  url: safeExternalUrl(source.url),
   title: sourceTitle(source, index),
   host: sourceHost(source.url),
 })))

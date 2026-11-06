@@ -223,7 +223,7 @@ class AccountTestService:
         if not images:
             raise RuntimeError("上游没有返回图片")
 
-        updated = account_service.mark_image_result(active_token, True)
+        updated = account_service.mark_image_result(active_token, True, release_slot=False)
         if updated is None:
             raise RuntimeError("图片已生成，但账号额度更新失败")
         return list(dict.fromkeys(images)), updated

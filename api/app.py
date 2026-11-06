@@ -85,7 +85,10 @@ def create_app() -> FastAPI:
             )
         except Exception as exc:
             logger.error({"event": "dashboard_metrics_startup_sync_failed", "error": str(exc)})
-        account_service.cleanup_auto_remove_accounts()
+        try:
+            await run_in_threadpool(account_service.cleanup_auto_remove_accounts)
+        except Exception as exc:
+            logger.error({"event": "account_startup_cleanup_failed", "error_type": exc.__class__.__name__})
         stop_event = Event()
         thread = start_account_lifecycle_watcher(stop_event)
         cleanup_thread = start_retention_cleanup_scheduler(stop_event)

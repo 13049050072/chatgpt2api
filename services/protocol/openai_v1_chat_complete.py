@@ -196,7 +196,20 @@ def chat_image_args(body: dict[str, Any]) -> tuple[str, str, int, list[tuple[byt
     return model, prompt, parse_image_count(body.get("n")), images, base_url, output_format, frame_count, frame_duration_ms
 
 
+def _reject_multiple_text_choices(body: dict[str, Any]) -> None:
+    try:
+        choices = int(body.get("n") or 1)
+    except (TypeError, ValueError):
+        choices = 1
+    if choices > 1:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "n greater than 1 is not supported for text completions"},
+        )
+
+
 def text_chat_parts(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    _reject_multiple_text_choices(body)
     model = str(body.get("model") or "auto").strip() or "auto"
     messages = normalize_text_messages(normalize_messages(chat_messages_from_body(body)))
     if has_unsupported_tools(body, WEB_SEARCH_TOOL_TYPES):

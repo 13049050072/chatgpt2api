@@ -19,6 +19,7 @@ from utils.timezone import beijing_from_timestamp
 RETENTION_CLEANUP_INTERVAL_SECS = 1800
 RETENTION_STOP_POLL_SECS = 0.25
 RETENTION_STARTUP_DEDUPE_SECS = 60
+RETENTION_STARTUP_LOCK_TIMEOUT_SECS = 5.0
 RETENTION_ERROR_BACKOFF_INITIAL_SECS = 0.25
 RETENTION_ERROR_BACKOFF_MAX_SECS = 5.0
 CleanupResult = dict[str, int | bool]
@@ -123,13 +124,18 @@ class RetentionCleanupCoordinator:
                 yield state
 
     @contextmanager
-    def _run_owner(self) -> Iterator[None]:
-        with self._run_lock:
+    def _run_owner(self, *, timeout_seconds: float | None = None) -> Iterator[None]:
+        acquired = self._run_lock.acquire(timeout=-1 if timeout_seconds is None else timeout_seconds)
+        if not acquired:
+            raise TimeoutError("retention cleanup is already running")
+        try:
             if self._repository is None:
                 yield
                 return
-            with self._repository.run_lock():
+            with self._repository.run_lock(timeout_seconds=timeout_seconds):
                 yield
+        finally:
+            self._run_lock.release()
 
     def _shared_schedule_epoch(self, *, initialize: bool) -> float | None:
         if self._repository is None:
@@ -394,23 +400,34 @@ class RetentionCleanupCoordinator:
         return result
 
     def run_startup_automatic(self, *, enforce_image_free_space: bool) -> dict[str, Any]:
-        with self._run_owner():
-            now = time.time()
-            if self._repository is not None:
-                with self._shared_state() as state:
-                    try:
-                        last_startup = float(state.get("last_startup_epoch") or 0)
-                    except (TypeError, ValueError):
-                        last_startup = 0
-                    if now - last_startup < RETENTION_STARTUP_DEDUPE_SECS:
-                        return {**self._empty_automatic_result(), "skipped": True}
-            wake_revision = self._wake_revision()
-            result = self._run_automatic_owned(enforce_image_free_space=enforce_image_free_space)
-            self._schedule_after_cleanup(wake_revision)
-            if self._repository is not None:
-                with self._shared_state() as state:
-                    state["last_startup_epoch"] = time.time()
-            return result
+        try:
+            with self._run_owner(timeout_seconds=RETENTION_STARTUP_LOCK_TIMEOUT_SECS):
+                return self._run_startup_automatic_owned(
+                    enforce_image_free_space=enforce_image_free_space,
+                )
+        except TimeoutError:
+            # A crashed process can leave a lease that only expires later; the
+            # scheduler retries, so startup must not wait for it.
+            logger.info({"event": "retention_startup_cleanup_skipped", "reason": "cleanup_lock_busy"})
+            return {**self._empty_automatic_result(), "skipped": True}
+
+    def _run_startup_automatic_owned(self, *, enforce_image_free_space: bool) -> dict[str, Any]:
+        now = time.time()
+        if self._repository is not None:
+            with self._shared_state() as state:
+                try:
+                    last_startup = float(state.get("last_startup_epoch") or 0)
+                except (TypeError, ValueError):
+                    last_startup = 0
+                if now - last_startup < RETENTION_STARTUP_DEDUPE_SECS:
+                    return {**self._empty_automatic_result(), "skipped": True}
+        wake_revision = self._wake_revision()
+        result = self._run_automatic_owned(enforce_image_free_space=enforce_image_free_space)
+        self._schedule_after_cleanup(wake_revision)
+        if self._repository is not None:
+            with self._shared_state() as state:
+                state["last_startup_epoch"] = time.time()
+        return result
 
     def _wait_for_cleanup(self, stop_event: threading.Event, deadline: float) -> bool:
         while not stop_event.is_set():

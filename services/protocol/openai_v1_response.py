@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Iterable, Iterator
 
 from fastapi import HTTPException
@@ -47,6 +50,90 @@ TOOL_UNAVAILABLE_SYSTEM_MESSAGE = (
 )
 
 RESPONSE_CONTENT_PART_TYPES = {"text", "input_text", "output_text", "image_url", "input_image", "image"}
+
+STORED_RESPONSE_TTL_SECONDS = 60 * 60
+STORED_RESPONSE_LIMIT = 256
+STORED_RESPONSE_MAX_CHARS = 4 * 1024 * 1024
+STORED_RESPONSE_TOTAL_CHARS = 64 * 1024 * 1024
+
+
+class _StoredResponses:
+    """Owner-scoped, in-process conversation history for previous_response_id."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: OrderedDict[str, tuple[float, str, list[dict[str, Any]], int]] = OrderedDict()
+        self._total_chars = 0
+
+    def _pop_locked(self, response_id: str) -> None:
+        item = self._items.pop(response_id, None)
+        if item is not None:
+            self._total_chars -= item[3]
+
+    def put(self, response_id: str, owner: str, messages: list[dict[str, Any]]) -> None:
+        try:
+            size = len(json.dumps(messages, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            return
+        if size > STORED_RESPONSE_MAX_CHARS:
+            return
+        expires_at = time.monotonic() + STORED_RESPONSE_TTL_SECONDS
+        with self._lock:
+            self._pop_locked(response_id)
+            self._items[response_id] = (expires_at, owner, messages, size)
+            self._total_chars += size
+            while self._items and (
+                len(self._items) > STORED_RESPONSE_LIMIT
+                or self._total_chars > STORED_RESPONSE_TOTAL_CHARS
+            ):
+                self._pop_locked(next(iter(self._items)))
+
+    def get(self, response_id: str, owner: str) -> list[dict[str, Any]] | None:
+        now = time.monotonic()
+        with self._lock:
+            item = self._items.get(response_id)
+            if item is None:
+                return None
+            expires_at, stored_owner, messages, _size = item
+            if expires_at <= now:
+                self._pop_locked(response_id)
+                return None
+            if stored_owner != owner:
+                return None
+            return list(messages)
+
+
+stored_responses = _StoredResponses()
+
+
+def _response_owner(body: dict[str, Any]) -> str:
+    return str(body.get("_caller_key_id") or "")
+
+
+def _previous_response_messages(body: dict[str, Any]) -> list[dict[str, Any]]:
+    previous_id = str(body.get("previous_response_id") or "").strip()
+    if not previous_id:
+        return []
+    messages = stored_responses.get(previous_id, _response_owner(body))
+    if messages is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": f"Previous response with id '{previous_id}' not found."},
+        )
+    return messages
+
+
+def _remember_response(body: dict[str, Any], response_id: str, reply_text: str) -> None:
+    if body.get("store") is False:
+        return
+    conversation = body.get("_conversation_messages")
+    if not isinstance(conversation, list):
+        return
+    stored_responses.put(
+        response_id,
+        _response_owner(body),
+        [*conversation, {"role": "assistant", "content": reply_text}],
+    )
 
 
 def is_text_response_request(body: dict[str, Any]) -> bool:
@@ -296,7 +383,12 @@ def _backend_account_email(backend: object) -> str:
 
 def text_response_parts(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     model = str(body.get("model") or "auto").strip() or "auto"
-    messages = normalize_text_messages(normalize_messages(messages_from_input(body.get("input"), body.get("instructions"))))
+    history = _previous_response_messages(body)
+    current = messages_from_input(body.get("input"))
+    # Instructions are not carried into later turns; each request supplies its own.
+    body["_conversation_messages"] = [*history, *current]
+    conversation = [*messages_from_input(None, body.get("instructions")), *history, *current]
+    messages = normalize_text_messages(normalize_messages(conversation))
     if has_unsupported_response_tools(body):
         messages.insert(0, {"role": "system", "content": TOOL_UNAVAILABLE_SYSTEM_MESSAGE})
     return model, messages
@@ -333,6 +425,7 @@ def stream_text_response(backend, body: dict[str, Any], messages: list[dict[str,
     completed = response_completed(response_id, model, created, [item], usage)
     _with_log_metadata(completed, _backend_account_email(backend))
     _with_log_metadata(completed["response"], _backend_account_email(backend))
+    _remember_response(body, response_id, full_text)
     yield completed
 
 
@@ -371,7 +464,9 @@ def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, An
         input_image_tokens=count_message_image_tokens(messages, model),
         output_text_tokens=count_text_tokens(text, model),
     )
-    yield response_completed(response_id, model, created, [search_item, message_item], usage)
+    completed = response_completed(response_id, model, created, [search_item, message_item], usage)
+    _remember_response(body, response_id, text)
+    yield completed
 
 
 def stream_image_response(
@@ -466,6 +561,11 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         )
         return
 
+    if str(body.get("previous_response_id") or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "previous_response_id is not supported with the image_generation tool"},
+        )
     prompt = extract_response_prompt(body.get("input"))
     if not prompt:
         raise HTTPException(status_code=400, detail={"error": "input text is required"})

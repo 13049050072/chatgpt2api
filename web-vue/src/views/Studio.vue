@@ -324,11 +324,21 @@ const conversationNotices = ref<Record<string, StudioConversationBadgeState>>(pe
 const conversationLookup = computed<StudioConversationLookup>(() => buildStudioConversationLookup(conversations.value))
 const conversationRuntimeIndex = computed<StudioConversationRuntimeIndex>(() => buildStudioConversationRuntimeIndex(conversations.value))
 const validConversationIds = computed(() => conversationLookup.value.validIds)
+let storageLimitWarned = false
 const conversationPersistenceRuntime = useStudioConversationPersistenceRuntime({
   conversations,
   conversationNotices,
   activeConversationId,
   validConversationIds,
+  onStorageLimited(status) {
+    if (storageLimitWarned) return
+    storageLimitWarned = true
+    toast.warning({
+      failed: '浏览器存储空间已满，对话历史没有保存，请删除部分对话后重试',
+      trimmed: '浏览器存储空间不足，较早的对话没有保存，请删除部分对话',
+      slimmed: '浏览器存储空间不足，部分参考图未保存到对话历史',
+    }[status])
+  },
 })
 const activeConversation = computed(() => {
   return conversationLookup.value.byId.get(activeConversationId.value)

@@ -23,7 +23,7 @@ from services.storage.configuration_repository import (
 )
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = Path(os.getenv("CHATGPT2API_DATA_DIR", "").strip() or BASE_DIR / "data").resolve()
 CONFIG_FILE = BASE_DIR / "config.json"
 VERSION_FILE = BASE_DIR / "VERSION"
 
@@ -40,6 +40,7 @@ DEFAULT_BACKUP_INCLUDE = {
 }
 
 _DATABASE_SETTINGS_REFRESH_INTERVAL_SECONDS = 1.0
+_DATABASE_SETTINGS_FAILURE_BACKOFF_SECONDS = 5.0
 
 DEFAULT_IMAGE_STORAGE = {
     "enabled": False,
@@ -425,12 +426,25 @@ def _validate_genbox_push_settings(settings: dict[str, object]) -> None:
         raise ValueError("启用 GenBox Push 后必须填写 Push Key")
 
 
+_PLACEHOLDER_AUTH_KEYS = frozenset({
+    "your_secret_key_here",
+    "your_secret_key",
+    "your-auth-key",
+    "your_real_auth_key",
+})
+
+
 def _normalize_auth_key(value: object) -> str:
     return str(value or "").strip()
 
 
+def is_placeholder_auth_key(value: object) -> bool:
+    return _normalize_auth_key(value).lower() in _PLACEHOLDER_AUTH_KEYS
+
+
 def _is_invalid_auth_key(value: object) -> bool:
-    return _normalize_auth_key(value) == ""
+    normalized = _normalize_auth_key(value)
+    return normalized == "" or is_placeholder_auth_key(normalized)
 
 
 class ConfigStore:
@@ -443,6 +457,7 @@ class ConfigStore:
     ):
         self.path = path
         self._lock = threading.RLock()
+        self._bootstrap_cache: tuple[tuple[int, int] | None, dict[str, object]] | None = None
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self._settings_repository = settings_repository or system_settings_repository
         self._groups_repository = groups_repository or account_group_repository
@@ -451,12 +466,10 @@ class ConfigStore:
         self._storage_backend: StorageBackend | None = None
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
-                "❌ auth-key 未设置！\n"
-                "请按以下任意一种方式解决：\n"
-                "1. 在 Render 的 Environment 变量中添加：\n"
-                "   CHATGPT2API_AUTH_KEY = your_real_auth_key\n"
-                "2. 或者在 config.json 中填写：\n"
-                '   "auth-key": "your_real_auth_key"'
+                "❌ auth-key 未设置，或仍是示例占位值！\n"
+                "请设置一个私有的随机密钥，任选一种方式：\n"
+                "1. 环境变量 CHATGPT2API_AUTH_KEY\n"
+                '2. config.json 中的 "auth-key"'
             )
 
     @property
@@ -479,15 +492,43 @@ class ConfigStore:
                 < _DATABASE_SETTINGS_REFRESH_INTERVAL_SECONDS
             ):
                 return
-            self.data = self._load()
+            try:
+                self.data = self._load()
+            except Exception as exc:
+                # Keep serving the last loaded settings while the database is unavailable.
+                self._last_repository_refresh_at = (
+                    now
+                    + _DATABASE_SETTINGS_FAILURE_BACKOFF_SECONDS
+                    - _DATABASE_SETTINGS_REFRESH_INTERVAL_SECONDS
+                )
+                from utils.log import logger
+
+                logger.warning({
+                    "event": "settings_reload_failed",
+                    "error_type": exc.__class__.__name__,
+                })
+                return
             self._last_repository_refresh_at = now
+
+    def _bootstrap_config(self) -> dict[str, object]:
+        try:
+            stat = self.path.stat()
+            signature: tuple[int, int] | None = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = None
+        cached = self._bootstrap_cache
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        data = read_json_object(self.path, name="config.json")
+        self._bootstrap_cache = (signature, data)
+        return data
 
     @property
     def auth_key(self) -> str:
-        bootstrap = read_json_object(self.path, name="config.json")
-        return _normalize_auth_key(
-            os.getenv("CHATGPT2API_AUTH_KEY") or bootstrap.get("auth-key")
-        )
+        environment_key = os.getenv("CHATGPT2API_AUTH_KEY")
+        if environment_key:
+            return _normalize_auth_key(environment_key)
+        return _normalize_auth_key(self._bootstrap_config().get("auth-key"))
 
     @property
     def refresh_account_interval_minute(self) -> int:

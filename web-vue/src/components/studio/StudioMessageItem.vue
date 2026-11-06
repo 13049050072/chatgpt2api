@@ -100,8 +100,12 @@
                   <span v-else-if="!message.fileTask">正在读取下载地址</span>
                   <span v-else>可下载源文件或完整压缩包。</span>
 
-                  <div v-if="message.fileTask?.status === 'success'" class="studio-file-task-actions">
+                  <div
+                    v-if="message.fileTask?.status === 'success' && message.fileTask.can_download"
+                    class="studio-file-task-actions"
+                  >
                     <button
+                      v-if="message.fileTask.result.primary_url"
                       type="button"
                       class="studio-file-task-action"
                       :disabled="isDownloadingFileTask"
@@ -111,6 +115,7 @@
                       下载 {{ fileKindLabel(message) }}
                     </button>
                     <button
+                      v-if="message.fileTask.result.zip_url"
                       type="button"
                       class="studio-file-task-action"
                       :disabled="isDownloadingFileTask"

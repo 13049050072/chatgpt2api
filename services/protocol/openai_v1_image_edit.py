@@ -20,6 +20,16 @@ from services.protocol.conversation import (
 from utils.image_tokens import count_image_inputs_tokens, count_image_output_items_tokens, image_usage
 
 
+def _mask_alpha(mask_img: Image.Image) -> Image.Image:
+    if "A" in mask_img.getbands():
+        return mask_img.getchannel("A")
+    if "transparency" in mask_img.info:
+        return mask_img.convert("RGBA").getchannel("A")
+    if mask_img.mode == "L":
+        return mask_img
+    return mask_img.convert("L")
+
+
 def _composite_mask(
     images: list[tuple[bytes, str, str]],
     masks: list[tuple[bytes, str, str]],
@@ -35,18 +45,18 @@ def _composite_mask(
     result: list[tuple[bytes, str, str]] = []
     for i, (data, filename, mime_type) in enumerate(images):
         mask_data = masks[i][0] if i < len(masks) else masks[-1][0]
-        img = Image.open(BytesIO(data)).convert("RGBA")
-        mask_img = Image.open(BytesIO(mask_data))
-        if mask_img.mode == "RGBA":
-            alpha = mask_img.split()[3]
-        elif mask_img.mode == "L":
-            alpha = mask_img
-        else:
-            alpha = mask_img.convert("L")
-        alpha = alpha.resize(img.size, Image.LANCZOS)
-        img.putalpha(alpha)
-        buf = BytesIO()
-        img.save(buf, format="PNG")
+        try:
+            img = Image.open(BytesIO(data)).convert("RGBA")
+            alpha = _mask_alpha(Image.open(BytesIO(mask_data)))
+            alpha = alpha.resize(img.size, Image.LANCZOS)
+            img.putalpha(alpha)
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+        except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
+            raise ImageGenerationError(
+                "image or mask is not a valid image",
+                failure=image_failure("invalid_image_input", raw_detail=str(exc)),
+            ) from exc
         result.append((buf.getvalue(), filename, "image/png"))
     return result
 

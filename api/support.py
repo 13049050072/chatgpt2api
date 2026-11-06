@@ -7,8 +7,8 @@ from threading import Event, Thread
 from fastapi import HTTPException, Request
 
 from services.account_service import account_service
-from services.auth_service import auth_service
-from services.config import config
+from services.auth_service import AuthKeyStoreUnavailableError, auth_service
+from services.config import config, is_placeholder_auth_key
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
@@ -23,7 +23,7 @@ def extract_bearer_token(authorization: str | None) -> str:
 
 def _legacy_admin_identity(token: str) -> dict[str, object] | None:
     auth_key = str(config.auth_key or "").strip()
-    if not auth_key or len(token) != len(auth_key):
+    if not auth_key or is_placeholder_auth_key(auth_key) or len(token) != len(auth_key):
         return None
     if hmac.compare_digest(token, auth_key):
         return {"id": "admin", "name": "管理员", "role": "admin"}
@@ -32,7 +32,13 @@ def _legacy_admin_identity(token: str) -> dict[str, object] | None:
 
 def require_identity(authorization: str | None) -> dict[str, object]:
     token = extract_bearer_token(authorization)
-    identity = _legacy_admin_identity(token) or auth_service.authenticate(token)
+    identity = _legacy_admin_identity(token)
+    if identity is None:
+        try:
+            identity = auth_service.authenticate(token)
+        except AuthKeyStoreUnavailableError as exc:
+            # Unknown, not invalid: clients must retry instead of signing out.
+            raise HTTPException(status_code=503, detail={"error": "密钥校验暂时不可用，请稍后重试"}) from exc
     if identity is None:
         raise HTTPException(status_code=401, detail={"error": "密钥无效或已失效，请重新登录"})
     return identity
@@ -75,6 +81,17 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
     return [sanitized for server in servers if (sanitized := sanitize_sub2api_server(server)) is not None]
 
 
+ACCOUNT_WATCHER_FALLBACK_INTERVAL_SECONDS = 5 * 60
+
+
+def _account_watcher_interval_seconds() -> float:
+    try:
+        return max(60.0, float(config.refresh_account_interval_minute) * 60)
+    except Exception as exc:
+        print(f"[account-watcher] interval unavailable, retrying in 5 minutes: {exc}")
+        return float(ACCOUNT_WATCHER_FALLBACK_INTERVAL_SECONDS)
+
+
 def start_account_lifecycle_watcher(stop_event: Event) -> Thread:
     def worker() -> None:
         while not stop_event.is_set():
@@ -104,7 +121,7 @@ def start_account_lifecycle_watcher(stop_event: Event) -> Thread:
                     account_service.sync_accounts_and_quota(limited_tokens)
             except Exception as exc:
                 print(f"[account-watcher] fail {exc}")
-            stop_event.wait(config.refresh_account_interval_minute * 60)
+            stop_event.wait(_account_watcher_interval_seconds())
 
     thread = Thread(target=worker, name="account-lifecycle-watcher", daemon=True)
     thread.start()

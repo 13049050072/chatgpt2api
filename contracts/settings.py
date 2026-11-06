@@ -45,6 +45,7 @@ class _AIReviewFields(_StrictModel):
     api_key: str = ""
     model: str = ""
     prompt: str = ""
+    fail_open: bool = True
 
 
 class AIReviewSettings(_AIReviewFields):

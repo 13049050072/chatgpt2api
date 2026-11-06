@@ -277,6 +277,7 @@ _FIELD_SPECS: dict[str, dict[str, Any]] = {
     "ai_review.api_key": _field_metadata("", sensitive=True),
     "ai_review.model": _field_metadata(""),
     "ai_review.prompt": _field_metadata(""),
+    "ai_review.fail_open": _field_metadata(True),
     "image_storage.enabled": _field_metadata(False),
     "image_storage.mode": _field_metadata("local", options=("local", "webdav", "both")),
     "image_storage.webdav_url": _field_metadata(""),
@@ -579,6 +580,7 @@ class SettingsManagementService:
                 has_api_key=bool(_text(stored_ai_review.get("api_key"))),
                 model=_text(ai_review.get("model")),
                 prompt=_text(ai_review.get("prompt")),
+                fail_open=_bool(ai_review.get("fail_open"), True),
             ),
             image_storage=ImageStorageSettings(
                 enabled=_bool(image_storage.get("enabled"), False),

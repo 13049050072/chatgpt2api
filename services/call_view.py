@@ -39,9 +39,11 @@ _IMAGE_FAILURE_LABELS = {
     "no_image_generated": "未生成图片",
     "unsupported_model": "模型不支持生图",
     "image_download_failed": "图片下载失败",
+    "image_storage_failed": "图片结果保存失败",
     "task_interrupted": "图片任务被中断",
     "no_available_account": "暂无可用账号",
     "insufficient_quota": "图片额度不足",
+    "client_disconnected": "客户端已断开",
 }
 
 _BUSINESS_LABELS = {

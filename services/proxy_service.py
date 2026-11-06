@@ -660,8 +660,9 @@ class ProxySettingsStore:
         group_id = _clean(account.get("group_id"))
         if not group_id:
             return ""
+        # A disabled group still pins its accounts' egress; disabling only stops scheduling.
         for group in self._config_dict_list("account_groups"):
-            if _clean(group.get("id")) != group_id or group.get("enabled") is False:
+            if _clean(group.get("id")) != group_id:
                 continue
             proxy = _clean(group.get("proxy"))
             if proxy:

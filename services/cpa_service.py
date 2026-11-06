@@ -26,6 +26,12 @@ from services.remote_import_job_status import import_job_is_active
 from services.storage.remote_import_configuration_repository import (
     RemoteImportConfigurationRepository,
 )
+from utils.bounded_http import (
+    close_streamed_response,
+    read_json_limited,
+    require_http_url,
+    response_succeeded,
+)
 
 
 def _new_id() -> str:
@@ -206,10 +212,17 @@ def list_remote_files(pool: dict) -> list[dict]:
             {"proxy": session_kwargs.get("proxy")},
         )
         session = Session(**session_kwargs)
-        response = session.get(url, headers=_management_headers(secret_key), timeout=30)
-        if not response.ok:
+        response = session.get(
+            require_http_url(url),
+            headers=_management_headers(secret_key),
+            timeout=30,
+            stream=True,
+            allow_redirects=False,
+        )
+        if not response_succeeded(response):
+            close_streamed_response(response)
             raise RuntimeError(f"remote list failed: HTTP {response.status_code}")
-        payload = response.json()
+        payload = read_json_limited(response)
     except Exception as exc:
         error = _normalize_import_error(
             exc,
@@ -254,10 +267,18 @@ def fetch_remote_account_payload(pool: dict, file_name: str) -> tuple[dict | Non
             {"proxy": session_kwargs.get("proxy")},
         )
         session = Session(**session_kwargs)
-        response = session.get(url, headers=_management_headers(secret_key), params={"name": file_name}, timeout=30)
-        if not response.ok:
+        response = session.get(
+            require_http_url(url),
+            headers=_management_headers(secret_key),
+            params={"name": file_name},
+            timeout=30,
+            stream=True,
+            allow_redirects=False,
+        )
+        if not response_succeeded(response):
+            close_streamed_response(response)
             return None, f"HTTP {response.status_code}"
-        payload = response.json()
+        payload = read_json_limited(response)
     except Exception as exc:
         return None, _normalize_import_error(
             exc,

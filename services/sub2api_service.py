@@ -8,6 +8,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
+from urllib.parse import quote
 
 from curl_cffi.requests import Session
 
@@ -30,11 +31,19 @@ from services.remote_import_job_status import import_job_is_active
 from services.storage.remote_import_configuration_repository import (
     RemoteImportConfigurationRepository,
 )
+from utils.bounded_http import (
+    close_streamed_response,
+    read_json_limited,
+    read_text_prefix,
+    require_http_url,
+    response_succeeded,
+)
 
 
 # Cached JWT per server to avoid re-login on every list/import call.
 # Token lifetime on sub2api defaults to 24h; we refresh 5 min before expiry.
 _TOKEN_REFRESH_SKEW = 5 * 60
+_REMOTE_PAGE_LIMIT = 500
 _account_group_lock = Lock()
 
 
@@ -335,19 +344,21 @@ def _login(base_url: str, email: str, password: str) -> tuple[str, float]:
     try:
         session = Session(verify=True)
         response = session.post(
-            url,
+            require_http_url(url),
             json={"email": email, "password": password},
             headers={"Accept": "application/json", "Content-Type": "application/json"},
             timeout=30,
+            stream=True,
+            allow_redirects=False,
         )
-        if not response.ok:
+        if not response_succeeded(response):
             error = _normalize_import_error(
-                f"sub2api login failed: HTTP {response.status_code} {response.text[:200]}",
+                f"sub2api login failed: HTTP {response.status_code} {read_text_prefix(response)}",
                 default_name="Sub2API login",
                 **_diagnostic_context({"password": password}),
             )["error"]
             raise RuntimeError(error)
-        payload = response.json()
+        payload = read_json_limited(response)
     except Exception as exc:
         error = _normalize_import_error(
             exc,
@@ -585,14 +596,16 @@ def list_remote_accounts(server: dict) -> list[dict]:
                 params["group"] = group_id
                 params["group_id"] = group_id
             response = session.get(
-                f"{base_url.rstrip('/')}/api/v1/admin/accounts",
+                require_http_url(f"{base_url.rstrip('/')}/api/v1/admin/accounts"),
                 headers=headers,
                 params=params,
                 timeout=30,
+                stream=True,
+                allow_redirects=False,
             )
-            if not response.ok:
-                raise RuntimeError(f"sub2api list failed: HTTP {response.status_code} {response.text[:200]}")
-            payload = response.json()
+            if not response_succeeded(response):
+                raise RuntimeError(f"sub2api list failed: HTTP {response.status_code} {read_text_prefix(response)}")
+            payload = read_json_limited(response)
 
             data, total = _extract_paged_items(payload)
             if not data:
@@ -621,7 +634,7 @@ def list_remote_accounts(server: dict) -> list[dict]:
                     "remote_group_name": remote_group_name or group_name,
                 })
 
-            if page * 200 >= total or len(data) < 200:
+            if page * 200 >= total or len(data) < 200 or page >= _REMOTE_PAGE_LIMIT:
                 break
             page += 1
     except Exception as exc:
@@ -653,17 +666,19 @@ def list_remote_groups(server: dict) -> list[dict]:
         page = 1
         while True:
             response = session.get(
-                f"{base_url.rstrip('/')}/api/v1/admin/groups",
+                require_http_url(f"{base_url.rstrip('/')}/api/v1/admin/groups"),
                 headers=headers,
                 params={
                     "page": page,
                     "page_size": 200,
                 },
                 timeout=30,
+                stream=True,
+                allow_redirects=False,
             )
-            if not response.ok:
-                raise RuntimeError(f"sub2api groups failed: HTTP {response.status_code} {response.text[:200]}")
-            payload = response.json()
+            if not response_succeeded(response):
+                raise RuntimeError(f"sub2api groups failed: HTTP {response.status_code} {read_text_prefix(response)}")
+            payload = read_json_limited(response)
 
             data, total = _extract_paged_items(payload)
             if not data:
@@ -685,7 +700,7 @@ def list_remote_groups(server: dict) -> list[dict]:
                     "active_account_count": int(group.get("active_account_count") or 0),
                 })
 
-            if page * 200 >= total or len(data) < 200:
+            if page * 200 >= total or len(data) < 200 or page >= _REMOTE_PAGE_LIMIT:
                 break
             page += 1
     except Exception as exc:
@@ -745,21 +760,33 @@ def _fetch_access_token_from_export(server: dict, account_id: str) -> tuple[str,
     session = Session(verify=True)
     try:
         response = session.get(
-            f"{base_url.rstrip('/')}/api/v1/admin/accounts/data",
+            require_http_url(f"{base_url.rstrip('/')}/api/v1/admin/accounts/data"),
             headers=headers,
             params={"ids": account_id, "include_proxies": "false"},
             timeout=30,
+            stream=True,
+            allow_redirects=False,
         )
-        if not response.ok:
+        if not response_succeeded(response):
+            close_streamed_response(response)
             raise RuntimeError(f"data export HTTP {response.status_code}")
-        payload = response.json()
+        payload = read_json_limited(response)
     finally:
         session.close()
 
     accounts = _extract_export_accounts(payload)
     if not accounts:
         raise RuntimeError("data export returned no accounts")
-    account = accounts[0]
+    exported_ids = [
+        _account_id(item, _account_section(item, "credentials", "credential"))
+        for item in accounts
+    ]
+    if account_id in exported_ids:
+        account = accounts[exported_ids.index(account_id)]
+    elif len(accounts) == 1:
+        account = accounts[0]
+    else:
+        raise RuntimeError("data export did not return this account")
     credentials = _account_section(account, "credentials", "credential")
     extra = _account_section(account, "extra", "metadata", "meta")
     access_token = _account_access_token(account)
@@ -776,9 +803,9 @@ def _fetch_access_tokens_for_accounts(server: dict, account_ids: list[str]) -> t
     """Return exported account data keyed by requested sub2api account id.
 
     Uses the batch data-export endpoint to avoid one HTTP request per account.  Some
-    older sub2api deployments may omit account ids in the export payload, so the
-    response order is used as a fallback mapping only when the exported id cannot
-    be matched to the requested ids.
+    older sub2api deployments omit account ids in the export payload; their response
+    order is not guaranteed, so unmatched items are reported and callers fetch those
+    accounts individually.  Only a single requested id may be matched by position.
     """
     ids = list(dict.fromkeys(_clean(item) for item in account_ids if _clean(item)))
     if not ids:
@@ -790,7 +817,7 @@ def _fetch_access_tokens_for_accounts(server: dict, account_ids: list[str]) -> t
     session = Session(verify=True)
     try:
         response = session.get(
-            f"{base_url.rstrip('/')}/api/v1/admin/accounts/data",
+            require_http_url(f"{base_url.rstrip('/')}/api/v1/admin/accounts/data"),
             headers=headers,
             params={
                 "ids": ",".join(ids),
@@ -798,10 +825,13 @@ def _fetch_access_tokens_for_accounts(server: dict, account_ids: list[str]) -> t
                 "include_proxies": "false",
             },
             timeout=30,
+            stream=True,
+            allow_redirects=False,
         )
-        if not response.ok:
+        if not response_succeeded(response):
+            close_streamed_response(response)
             raise RuntimeError(f"data export HTTP {response.status_code}")
-        payload = response.json()
+        payload = read_json_limited(response)
     finally:
         session.close()
 
@@ -812,11 +842,21 @@ def _fetch_access_tokens_for_accounts(server: dict, account_ids: list[str]) -> t
     requested = set(ids)
     results: dict[str, tuple[str, dict]] = {}
     errors: dict[str, str] = {}
-    for index, account in enumerate(accounts):
+    exported = []
+    for account in accounts:
         credentials = _account_section(account, "credentials", "credential")
+        exported.append((account, credentials, _account_id(account, credentials)))
+    positional = len(ids) == 1 and len(exported) == 1 and exported[0][2] not in requested
+    for index, (account, credentials, exported_id) in enumerate(exported):
         extra = _account_section(account, "extra", "metadata", "meta")
-        exported_id = _account_id(account, credentials)
-        account_id = exported_id if exported_id in requested else (ids[index] if index < len(ids) else exported_id)
+        if exported_id in requested:
+            account_id = exported_id
+        elif positional:
+            account_id = ids[index]
+        else:
+            continue
+        if account_id in results:
+            continue
         account_name = account_id or _account_email(account, credentials, extra) or _clean(account.get("name")) or "unknown"
         access_token = _account_access_token(account)
         if not access_token:
@@ -855,13 +895,16 @@ def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str,
     session = Session(verify=True)
     try:
         response = session.get(
-            f"{base_url.rstrip('/')}/api/v1/admin/accounts/{account_id}",
+            require_http_url(f"{base_url.rstrip('/')}/api/v1/admin/accounts/{quote(account_id, safe='')}"),
             headers=headers,
             timeout=30,
+            stream=True,
+            allow_redirects=False,
         )
-        if not response.ok:
+        if not response_succeeded(response):
+            close_streamed_response(response)
             raise RuntimeError(f"HTTP {response.status_code}")
-        payload = response.json()
+        payload = read_json_limited(response)
     finally:
         session.close()
 

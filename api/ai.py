@@ -10,9 +10,11 @@ from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import (
     EditableFileTaskCleanupError,
+    EditableFileTaskInputError,
     EditableFileTaskInvalidIdError,
     EditableFileTaskNotFoundError,
     EditableFileTaskNotTerminalError,
+    EditableFileTaskQueueFullError,
     editable_file_task_service,
 )
 from services.log_service import LoggedCall
@@ -113,7 +115,7 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
     try:
         await run_in_threadpool(check_request, text)
     except HTTPException as exc:
-        call.log("调用失败", status="failed", error=str(exc.detail))
+        await call.log_async("调用失败", status="failed", error=str(exc.detail))
         raise
 
 
@@ -123,9 +125,14 @@ def create_router() -> APIRouter:
     async def submit_editable_file_task(submit, identity, **kwargs):
         try:
             return await run_in_threadpool(submit, identity, **kwargs)
-        except EditableFileTaskInvalidIdError as exc:
+        except (EditableFileTaskInvalidIdError, EditableFileTaskInputError) as exc:
             raise HTTPException(
                 status_code=400,
+                detail={"error": str(exc)},
+            ) from exc
+        except EditableFileTaskQueueFullError as exc:
+            raise HTTPException(
+                status_code=503,
                 detail={"error": str(exc)},
             ) from exc
 

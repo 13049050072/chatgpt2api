@@ -66,6 +66,7 @@ import type {
   StudioMessage,
   StudioReferenceImage,
   StudioSearchImageGroup,
+  StudioSearchSource,
 } from './types'
 
 const props = defineProps<{
@@ -238,6 +239,7 @@ function messageViewSignature(
     fileTask?.status,
     fileTask?.updated_at,
     fileTask?.elapsed_seconds,
+    fileTask?.can_download,
     compactStringSignature(fileTask?.status === 'error' ? fileTask.error : ''),
     compactStringSignature(fileTask?.status === 'success' ? fileTask.result.primary_url : ''),
     compactStringSignature(fileTask?.status === 'success' ? fileTask.result.zip_url : ''),

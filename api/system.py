@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
@@ -38,7 +39,8 @@ from contracts.settings import (
     SettingsView,
 )
 from contracts.updates import UpdateStatusView, UpdateTaskView
-from api.support import require_admin, require_identity, resolve_image_base_url
+from api.errors import FAILED_AUTH_DELAY_SECONDS
+from api.support import extract_bearer_token, require_admin, require_identity, resolve_image_base_url
 from services.account_service import account_service
 from services.auth_view import build_auth_view
 from services.backup_service import BackupError, backup_service
@@ -184,7 +186,12 @@ def create_router(app_version: str) -> APIRouter:
     async def auth_status(authorization: str | None = Header(default=None)):
         try:
             identity = require_identity(authorization)
-        except HTTPException:
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+            # The anonymous view still tells callers whether the key was valid.
+            if extract_bearer_token(authorization):
+                await asyncio.sleep(FAILED_AUTH_DELAY_SECONDS)
             return build_auth_view(app_version)
         return build_auth_view(app_version, identity)
 
@@ -203,13 +210,13 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/system/update-task", response_model=UpdateTaskView)
     async def get_update_task(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return update_service.view(app_version)
+        return await run_in_threadpool(update_service.view, app_version)
 
     @router.post("/api/system/update", response_model=UpdateTaskView, status_code=202)
     async def start_update(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
-            return update_service.start(app_version)
+            return await run_in_threadpool(update_service.start, app_version)
         except UpdateInstallError as exc:
             raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
 
@@ -228,7 +235,7 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         try:
             result = await run_in_threadpool(settings_management_service.update, body)
-            _notify_retention_cleanup_if_changed(result.changed_fields)
+            await run_in_threadpool(_notify_retention_cleanup_if_changed, result.changed_fields)
             return result
         except SettingsRevisionConflictError as exc:
             raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
@@ -295,21 +302,27 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/images/{image_path:path}", include_in_schema=False)
     async def get_image(image_path: str):
-        return get_image_response(image_path)
+        return await run_in_threadpool(get_image_response, image_path)
 
     @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
     async def get_image_thumbnail(image_path: str):
-        return get_thumbnail_response(image_path)
+        return await run_in_threadpool(get_thumbnail_response, image_path)
 
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return delete_images(body.paths, start_date=body.start_date.strip(), end_date=body.end_date.strip(), all_matching=body.all_matching)
+        return await run_in_threadpool(
+            delete_images,
+            body.paths,
+            start_date=body.start_date.strip(),
+            end_date=body.end_date.strip(),
+            all_matching=body.all_matching,
+        )
 
     @router.post("/api/images/download")
     async def download_images_endpoint(body: ImageDownloadRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        buf = download_images_zip(body.paths)
+        buf = await run_in_threadpool(download_images_zip, body.paths)
         return StreamingResponse(
             buf,
             media_type="application/zip",
@@ -319,7 +332,7 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/images/download/{image_path:path}")
     async def download_single_image_endpoint(image_path: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return get_image_download_response(image_path)
+        return await run_in_threadpool(get_image_download_response, image_path)
 
     @router.post("/api/images/genbox-push", response_model=GalleryGenBoxPushResult)
     async def push_image_to_genbox(
@@ -563,7 +576,7 @@ def create_router(app_version: str) -> APIRouter:
         try:
             return {
                 "items": await run_in_threadpool(backup_service.list_backups),
-                "state": backup_service.get_status(),
+                "state": await run_in_threadpool(backup_service.get_status),
             }
         except BackupError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
@@ -591,13 +604,13 @@ def create_router(app_version: str) -> APIRouter:
         rel = body.path.strip().lstrip("/")
         if not rel:
             raise HTTPException(status_code=400, detail={"error": "path is required"})
-        tags = set_tags(rel, body.tags)
+        tags = await run_in_threadpool(set_tags, rel, body.tags)
         return {"ok": True, "tags": tags}
 
     @router.get("/api/images/storage")
     async def get_image_storage(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return storage_stats()
+        return await run_in_threadpool(storage_stats)
 
     @router.post("/api/images/storage/compress", response_model=GalleryCompressResult)
     async def compress_all_images(authorization: str | None = Header(default=None)):

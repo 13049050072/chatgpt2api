@@ -33,6 +33,7 @@ from api.support import (
     sanitize_sub2api_servers,
 )
 from services.account_operation_events import (
+    import_outcome_event,
     normalize_account_operation_events,
     project_account_operation_presentation,
 )
@@ -415,10 +416,10 @@ def _get_account_by_id(account_id: str) -> dict[str, Any] | None:
     )
 
 
-def _get_account_by_token_identity(access_token: str) -> dict[str, Any] | None:
+def _get_account_by_token_identity(access_token: str, source_type: str | None = None) -> dict[str, Any] | None:
     getter = getattr(account_service, "get_account_by_token_identity", None)
     if callable(getter):
-        return getter(access_token)
+        return getter(access_token, source_type=source_type)
     return account_service.get_account(access_token)
 
 
@@ -672,6 +673,20 @@ def _account_status_operation(
     }[resolved]
 
 
+_IMPORT_OUTCOME_RANK = {"stale": 1, "skipped": 2, "updated": 3, "added": 4}
+
+
+def _record_import_outcome(outcomes: dict[str, str], key: str, outcome: str) -> None:
+    """Keep the most significant outcome when several credentials hit one account."""
+    if _IMPORT_OUTCOME_RANK.get(outcome, 0) > _IMPORT_OUTCOME_RANK.get(outcomes.get(key, ""), 0):
+        outcomes[key] = outcome
+
+
+def _existing_account_count(result: dict[str, Any]) -> int:
+    """Imported credentials that matched an existing account, updated or not."""
+    return max(0, int(result.get("skipped") or 0)) + max(0, int(result.get("updated") or 0))
+
+
 def _account_mutation_events(
     *,
     action: str,
@@ -681,8 +696,10 @@ def _account_mutation_events(
     labels: dict[str, str] | None = None,
     success_message: str,
     removed_message: str = "",
+    outcomes: dict[str, tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     labels = labels or {}
+    outcomes = outcomes or {}
     normalized_errors = [
         item for item in (errors or []) if isinstance(item, dict)
     ]
@@ -698,13 +715,14 @@ def _account_mutation_events(
         if not normalized_id or normalized_id in error_ids:
             continue
         sequence += 1
+        status, message = outcomes.get(normalized_id, ("success", success_message))
         raw_events.append({
             "sequence": sequence,
             "account_id": normalized_id,
             "account_label": labels.get(normalized_id, normalized_id),
             "action": action,
-            "status": "success",
-            "message": success_message,
+            "status": status,
+            "message": message,
         })
     for account_id in dict.fromkeys(removed_ids or []):
         normalized_id = _clean_text(account_id)
@@ -1222,7 +1240,7 @@ def create_router() -> APIRouter:
         return {"deleted_id": key_id}
 
     @router.get("/api/accounts")
-    async def get_accounts(
+    def get_accounts(
             page: int = Query(default=1, ge=1),
             page_size: int = Query(default=500, ge=1, le=500),
             keyword: str = "",
@@ -1250,7 +1268,7 @@ def create_router() -> APIRouter:
         return await run_in_threadpool(_account_selection_preview, body.selection)
 
     @router.get("/api/accounts/{account_id}")
-    async def get_account_detail(account_id: str, authorization: str | None = Header(default=None)):
+    def get_account_detail(account_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         account = _get_account_by_id(account_id)
         if account is None:
@@ -1267,7 +1285,7 @@ def create_router() -> APIRouter:
         authorization: str | None = Header(default=None),
     ):
         identity = require_admin(authorization)
-        if _get_account_by_id(account_id) is None:
+        if await run_in_threadpool(_get_account_by_id, account_id) is None:
             raise HTTPException(status_code=404, detail={"error": "account not found"})
         payload = {**body.model_dump(), "account_id": account_id}
         call = LoggedCall(
@@ -1281,7 +1299,7 @@ def create_router() -> APIRouter:
         return await call.run(account_test_service.execute, payload)
 
     @router.get("/api/accounts/{account_id}/access-token")
-    async def get_account_access_token(
+    def get_account_access_token(
         account_id: str,
         authorization: str | None = Header(default=None),
     ):
@@ -1298,7 +1316,7 @@ def create_router() -> APIRouter:
         )
 
     @router.get("/api/accounts/{account_id}/refresh-token")
-    async def get_account_refresh_token(
+    def get_account_refresh_token(
         account_id: str,
         authorization: str | None = Header(default=None),
     ):
@@ -1316,12 +1334,12 @@ def create_router() -> APIRouter:
 
 
     @router.get("/api/account-groups")
-    async def list_account_groups(authorization: str | None = Header(default=None)):
+    def list_account_groups(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return _account_group_payload()
 
     @router.post("/api/account-groups")
-    async def save_account_group(body: AccountGroupRequest, authorization: str | None = Header(default=None)):
+    def save_account_group(body: AccountGroupRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             return _upsert_account_group(body)
@@ -1329,7 +1347,7 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
     @router.delete("/api/account-groups/{group_id}")
-    async def delete_account_group(group_id: str, authorization: str | None = Header(default=None)):
+    def delete_account_group(group_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         normalized = _account_group_id(group_id)
         groups = _config_dict_list("account_groups")
@@ -1348,8 +1366,7 @@ def create_router() -> APIRouter:
             and _clean_text(account.get("management_id"))
         ]
         if targets:
-            result = await run_in_threadpool(
-                account_service.update_accounts,
+            result = account_service.update_accounts(
                 [token for token, _account_id in targets],
                 {"group_id": ""},
                 quiet=True,
@@ -1378,7 +1395,7 @@ def create_router() -> APIRouter:
         }
 
     @router.post("/api/accounts")
-    async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
+    def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         target_group_id = _target_account_group_id(body.target_group_id)
         account_payloads = [
@@ -1392,39 +1409,36 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
         try:
             if account_payloads:
-                result = await run_in_threadpool(
-                    account_service.add_account_items,
+                result = account_service.add_account_items(
                     account_payloads,
                     return_items=False,
                     restore=body.restore,
+                    return_item_results=not body.restore,
                 )
                 payload_token_set = set(_unique_tokens(payload_tokens))
                 extra_tokens = [token for token in tokens if token not in payload_token_set]
                 if extra_tokens:
                     if target_group_id is None:
-                        extra_result = await run_in_threadpool(
-                            account_service.add_accounts,
+                        extra_result = account_service.add_accounts(
                             extra_tokens,
                             return_items=False,
                         )
                     else:
-                        extra_result = await run_in_threadpool(
-                            account_service.add_account_items,
+                        extra_result = account_service.add_account_items(
                             [{"access_token": token, "group_id": target_group_id} for token in extra_tokens],
                             return_items=False,
                         )
                     result["added"] = int(result.get("added") or 0) + int(extra_result.get("added") or 0)
+                    result["updated"] = int(result.get("updated") or 0) + int(extra_result.get("updated") or 0)
                     result["skipped"] = int(result.get("skipped") or 0) + int(extra_result.get("skipped") or 0)
             else:
                 if target_group_id is None:
-                    result = await run_in_threadpool(
-                        account_service.add_accounts,
+                    result = account_service.add_accounts(
                         tokens,
                         return_items=False,
                     )
                 else:
-                    result = await run_in_threadpool(
-                        account_service.add_account_items,
+                    result = account_service.add_account_items(
                         [{"access_token": token, "group_id": target_group_id} for token in tokens],
                         return_items=False,
                     )
@@ -1434,17 +1448,28 @@ def create_router() -> APIRouter:
                 detail={"error": str(exc)},
             ) from exc
 
+        source_by_token = {token: "web" for token in _unique_tokens(body.tokens)}
+        for item, token in zip(account_payloads, payload_tokens):
+            if token:
+                source_by_token[token] = _clean_text(item.get("source_type")) or "web"
+        outcome_by_token: dict[str, str] = {}
+        for token, outcome in zip(payload_tokens, result.get("item_results") or []):
+            if token:
+                _record_import_outcome(outcome_by_token, token, outcome)
+        outcome_by_account: dict[str, str] = {}
         targets: list[tuple[str, str]] = []
         target_ids: set[str] = set()
         sensitive_values = list(tokens)
         proxy_values: list[str] = []
         for token in tokens:
-            account = _get_account_by_token_identity(token)
+            account = _get_account_by_token_identity(token, source_by_token.get(token))
             account_id = _clean_text((account or {}).get("management_id"))
             active_token = _clean_text((account or {}).get("access_token")) or token
             if account_id and account_id not in target_ids:
                 targets.append((active_token, account_id))
                 target_ids.add(account_id)
+            if account_id and token in outcome_by_token:
+                _record_import_outcome(outcome_by_account, account_id, outcome_by_token[token])
             for key in ("refresh_token", "id_token"):
                 value = _clean_text((account or {}).get(key))
                 if value:
@@ -1460,12 +1485,16 @@ def create_router() -> APIRouter:
             if body.refresh is not None
             else True
         )
+        outcome_events = {
+            account_id: import_outcome_event(outcome)
+            for account_id, outcome in outcome_by_account.items()
+        }
         if not sync_after_import:
             updated_ids = [account_id for _token, account_id in targets]
             labels = _account_operation_labels(targets)
             payload = _account_mutation_response(
                 added=max(0, int(result.get("added") or 0)),
-                skipped=max(0, int(result.get("skipped") or 0)),
+                skipped=_existing_account_count(result),
                 synced=0,
                 updated_ids=updated_ids,
                 events=_account_mutation_events(
@@ -1473,6 +1502,7 @@ def create_router() -> APIRouter:
                     success_ids=updated_ids,
                     labels=labels,
                     success_message="\u8d26\u53f7\u5df2\u4fdd\u5b58",
+                    outcomes=outcome_events,
                 ),
                 include_items=body.return_items,
             )
@@ -1480,8 +1510,7 @@ def create_router() -> APIRouter:
                 payload["refreshed"] = payload["synced"]
             return payload
 
-        refresh_result = await run_in_threadpool(
-            account_service.sync_accounts_and_quota,
+        refresh_result = account_service.sync_accounts_and_quota(
             _unique_tokens([active_token for active_token, _account_id in targets]),
         )
         updated_ids, removed_ids = _partition_account_ids([
@@ -1496,7 +1525,7 @@ def create_router() -> APIRouter:
         labels = _account_operation_labels(targets)
         payload = _account_mutation_response(
             added=max(0, int(result.get("added") or 0)),
-            skipped=max(0, int(result.get("skipped") or 0)),
+            skipped=_existing_account_count(result),
             synced=max(0, int(refresh_result.get("synced") or 0)),
             updated_ids=updated_ids,
             removed_ids=removed_ids,
@@ -1509,6 +1538,7 @@ def create_router() -> APIRouter:
                 labels=labels,
                 success_message="\u8d26\u53f7\u5df2\u4fdd\u5b58",
                 removed_message="\u8d26\u53f7\u4fdd\u5b58\u540e\u5df2\u88ab\u79fb\u9664",
+                outcomes=outcome_events,
             ),
             include_items=body.return_items,
         )
@@ -1521,14 +1551,15 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         if not body.selection and not body.account_ids and not body.tokens:
             raise HTTPException(status_code=400, detail={"error": "account_ids is required"})
-        targets, missing_ids = _account_selection_targets(
+        targets, missing_ids = await run_in_threadpool(
+            _account_selection_targets,
             body.selection,
             body.account_ids,
             body.tokens,
         )
         if not targets:
             raise HTTPException(status_code=400, detail={"error": "no valid accounts selected"})
-        labels = _account_operation_labels(targets)
+        labels = await run_in_threadpool(_account_operation_labels, targets)
         tokens = [token for token, _account_id in targets]
         target_ids = [account_id for _token, account_id in targets]
         id_by_token = {token: account_id for token, account_id in targets}
@@ -1542,10 +1573,9 @@ def create_router() -> APIRouter:
         )
         _publish_account_mutation_stage(progress_id, "prepare_accounts", len(targets))
 
-        async def _do_delete_accounts() -> None:
+        def _do_delete_accounts() -> None:
             try:
-                raw_result = await run_in_threadpool(
-                    account_service.delete_accounts,
+                raw_result = account_service.delete_accounts(
                     tokens,
                     return_items=False,
                     progress_callback=lambda stage, total: _publish_account_mutation_stage(
@@ -1591,7 +1621,7 @@ def create_router() -> APIRouter:
                     error="account deletion failed",
                 )
 
-        _schedule_account_operation(_do_delete_accounts())
+        _schedule_account_operation(run_in_threadpool(_do_delete_accounts))
         return {
             "progress_id": progress_id,
             "target_ids": target_ids,
@@ -1599,7 +1629,7 @@ def create_router() -> APIRouter:
         }
 
     @router.post("/api/accounts/import-cleanup")
-    async def cleanup_imported_abnormal_accounts(
+    def cleanup_imported_abnormal_accounts(
             body: AccountImportCleanupRequest,
             authorization: str | None = Header(default=None),
     ):
@@ -1659,11 +1689,13 @@ def create_router() -> APIRouter:
     ):
         """Force RT-to-AT exchange only; no account metadata or quota request."""
         require_admin(authorization)
-        targets, missing_ids = _account_selection_targets(
-            body.selection,
-            body.account_ids,
-            body.access_tokens,
-            default_all=False,
+        targets, missing_ids = await run_in_threadpool(
+            lambda: _account_selection_targets(
+                body.selection,
+                body.account_ids,
+                body.access_tokens,
+                default_all=False,
+            )
         )
         if not targets:
             raise HTTPException(
@@ -1681,7 +1713,7 @@ def create_router() -> APIRouter:
             id_by_token_hint,
             sensitive_values,
             proxy_values,
-        ) = _selected_refresh_context(targets)
+        ) = await run_in_threadpool(_selected_refresh_context, targets)
         account_service.init_refresh_progress(
             progress_id,
             len(access_tokens) + len(missing_ids),
@@ -1696,10 +1728,9 @@ def create_router() -> APIRouter:
                 event_message="account_not_found · \u8d26\u53f7\u4e0d\u5b58\u5728",
             )
 
-        async def _do_refresh_access_tokens():
+        def _do_refresh_access_tokens():
             try:
-                raw_result = await run_in_threadpool(
-                    account_service.refresh_access_tokens,
+                raw_result = account_service.refresh_access_tokens(
                     access_tokens,
                     progress_id,
                     finalize_progress=False,
@@ -1730,7 +1761,7 @@ def create_router() -> APIRouter:
                     error="access token refresh failed",
                 )
 
-        _schedule_account_operation(_do_refresh_access_tokens())
+        _schedule_account_operation(run_in_threadpool(_do_refresh_access_tokens))
         return {
             "progress_id": progress_id,
             "target_ids": target_ids,
@@ -1748,11 +1779,13 @@ def create_router() -> APIRouter:
         The /refresh path remains as a compatibility alias for existing clients.
         """
         require_admin(authorization)
-        targets, missing_ids = _account_selection_targets(
-            body.selection,
-            body.account_ids,
-            body.access_tokens,
-            default_all=True,
+        targets, missing_ids = await run_in_threadpool(
+            lambda: _account_selection_targets(
+                body.selection,
+                body.account_ids,
+                body.access_tokens,
+                default_all=True,
+            )
         )
         if not targets:
             raise HTTPException(
@@ -1770,7 +1803,7 @@ def create_router() -> APIRouter:
             id_by_token_hint,
             sensitive_values,
             proxy_values,
-        ) = _selected_refresh_context(targets)
+        ) = await run_in_threadpool(_selected_refresh_context, targets)
         account_service.init_refresh_progress(
             progress_id,
             len(access_tokens) + len(missing_ids),
@@ -1785,10 +1818,9 @@ def create_router() -> APIRouter:
                 event_message="account_not_found · \u8d26\u53f7\u4e0d\u5b58\u5728",
             )
 
-        async def _do_sync_accounts_and_quota():
+        def _do_sync_accounts_and_quota():
             try:
-                raw_result = await run_in_threadpool(
-                    account_service.sync_accounts_and_quota,
+                raw_result = account_service.sync_accounts_and_quota(
                     access_tokens,
                     progress_id,
                     finalize_progress=False,
@@ -1819,7 +1851,7 @@ def create_router() -> APIRouter:
                     error="account and quota synchronization failed",
                 )
 
-        _schedule_account_operation(_do_sync_accounts_and_quota())
+        _schedule_account_operation(run_in_threadpool(_do_sync_accounts_and_quota))
 
         return {
             "progress_id": progress_id,
@@ -1860,7 +1892,7 @@ def create_router() -> APIRouter:
         )
 
     @router.post("/api/accounts/export")
-    async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
+    def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         targets, missing_ids = _account_selection_targets(
             body.selection,
@@ -1937,7 +1969,7 @@ def create_router() -> APIRouter:
         )
 
     @router.post("/api/accounts/update")
-    async def update_account(body: AccountUpdateRequest, authorization: str | None = Header(default=None)):
+    def update_account(body: AccountUpdateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         account_id = _clean_text(body.id).lower()
         uses_management_id = bool(account_id)
@@ -2026,14 +2058,15 @@ def create_router() -> APIRouter:
             body.status,
             body.operation,
         )
-        targets, missing_ids = _account_selection_targets(
+        targets, missing_ids = await run_in_threadpool(
+            _account_selection_targets,
             body.selection,
             body.account_ids,
             body.access_tokens,
         )
         if not targets:
             raise HTTPException(status_code=400, detail={"error": "no valid accounts selected"})
-        labels = _account_operation_labels(targets)
+        labels = await run_in_threadpool(_account_operation_labels, targets)
         tokens = [token for token, _account_id in targets]
         target_ids = [account_id for _token, account_id in targets]
         id_by_token = {token: account_id for token, account_id in targets}
@@ -2047,10 +2080,9 @@ def create_router() -> APIRouter:
         )
         _publish_account_mutation_stage(progress_id, "prepare_accounts", len(targets))
 
-        async def _do_batch_update_accounts() -> None:
+        def _do_batch_update_accounts() -> None:
             try:
-                raw_result = await run_in_threadpool(
-                    account_service.update_accounts,
+                raw_result = account_service.update_accounts(
                     tokens,
                     updates,
                     quiet=True,
@@ -2102,14 +2134,14 @@ def create_router() -> APIRouter:
                     error="account batch update failed",
                 )
 
-        _schedule_account_operation(_do_batch_update_accounts())
+        _schedule_account_operation(run_in_threadpool(_do_batch_update_accounts))
         return {
             "progress_id": progress_id,
             "target_ids": target_ids,
             "errors": initial_errors,
         }
     @router.post("/api/accounts/group")
-    async def bind_accounts_group(body: AccountGroupBindRequest, authorization: str | None = Header(default=None)):
+    def bind_accounts_group(body: AccountGroupBindRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if not body.selection and not body.account_ids and not body.access_tokens:
             raise HTTPException(status_code=400, detail={"error": "account_ids is required"})
@@ -2124,8 +2156,7 @@ def create_router() -> APIRouter:
         if not targets:
             raise HTTPException(status_code=400, detail={"error": "no valid accounts selected"})
         labels = _account_operation_labels(targets)
-        result = await run_in_threadpool(
-            account_service.update_accounts,
+        result = account_service.update_accounts(
             [token for token, _account_id in targets],
             {"group_id": group_id},
             quiet=True,
@@ -2203,7 +2234,7 @@ def create_router() -> APIRouter:
             "id_token": tokens["id_token"],
             "source_type": "web",
         }
-        target_group_id = _target_account_group_id(body.target_group_id)
+        target_group_id = await run_in_threadpool(_target_account_group_id, body.target_group_id)
         if target_group_id is not None:
             payload["group_id"] = target_group_id
         add_result = await run_in_threadpool(
@@ -2211,24 +2242,24 @@ def create_router() -> APIRouter:
             [payload],
             False,
         )
-        account = account_service.get_account(tokens["access_token"])
+        account = await run_in_threadpool(account_service.get_account, tokens["access_token"])
         account_id = _clean_text((account or {}).get("management_id"))
         if not account_id:
             raise HTTPException(status_code=500, detail={"error": "created account could not be resolved"})
         return _account_mutation_payload(
             added=max(0, int(add_result.get("added") or 0)),
-            skipped=max(0, int(add_result.get("skipped") or 0)),
+            skipped=_existing_account_count(add_result),
             synced=0,
             updated_ids=[account_id],
         )
 
     @router.get("/api/cpa/pools")
-    async def list_cpa_pools(authorization: str | None = Header(default=None)):
+    def list_cpa_pools(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"pools": sanitize_cpa_pools(cpa_config.list_pools())}
 
     @router.post("/api/cpa/pools")
-    async def create_cpa_pool(body: CPAPoolCreateRequest, authorization: str | None = Header(default=None)):
+    def create_cpa_pool(body: CPAPoolCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if not body.base_url.strip():
             raise HTTPException(status_code=400, detail={"error": "base_url is required"})
@@ -2238,7 +2269,7 @@ def create_router() -> APIRouter:
         return {"pool": sanitize_cpa_pool(pool), "pools": sanitize_cpa_pools(cpa_config.list_pools())}
 
     @router.post("/api/cpa/pools/{pool_id}")
-    async def update_cpa_pool(pool_id: str, body: CPAPoolUpdateRequest, authorization: str | None = Header(default=None)):
+    def update_cpa_pool(pool_id: str, body: CPAPoolUpdateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             pool = cpa_config.update_pool(pool_id, body.model_dump(exclude_none=True))
@@ -2252,7 +2283,7 @@ def create_router() -> APIRouter:
         return {"pool": sanitize_cpa_pool(pool), "pools": sanitize_cpa_pools(cpa_config.list_pools())}
 
     @router.delete("/api/cpa/pools/{pool_id}")
-    async def delete_cpa_pool(pool_id: str, authorization: str | None = Header(default=None)):
+    def delete_cpa_pool(pool_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             deleted = cpa_config.delete_pool(pool_id)
@@ -2266,15 +2297,15 @@ def create_router() -> APIRouter:
         return {"pools": sanitize_cpa_pools(cpa_config.list_pools())}
 
     @router.get("/api/cpa/pools/{pool_id}/files")
-    async def cpa_pool_files(pool_id: str, authorization: str | None = Header(default=None)):
+    def cpa_pool_files(pool_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         pool = cpa_config.get_pool(pool_id)
         if pool is None:
             raise HTTPException(status_code=404, detail={"error": "pool not found"})
-        return {"pool_id": pool_id, "files": await run_in_threadpool(list_remote_files, pool)}
+        return {"pool_id": pool_id, "files": list_remote_files(pool)}
 
     @router.post("/api/cpa/pools/{pool_id}/import")
-    async def cpa_pool_import(pool_id: str, body: CPAImportRequest, authorization: str | None = Header(default=None)):
+    def cpa_pool_import(pool_id: str, body: CPAImportRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         pool = cpa_config.get_pool(pool_id)
         if pool is None:
@@ -2293,7 +2324,7 @@ def create_router() -> APIRouter:
         return {"import_job": job}
 
     @router.get("/api/cpa/pools/{pool_id}/import")
-    async def cpa_pool_import_progress(pool_id: str, authorization: str | None = Header(default=None)):
+    def cpa_pool_import_progress(pool_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         pool = cpa_config.get_pool(pool_id)
         if pool is None:
@@ -2301,12 +2332,12 @@ def create_router() -> APIRouter:
         return {"import_job": pool.get("import_job")}
 
     @router.get("/api/sub2api/servers")
-    async def list_sub2api_servers(authorization: str | None = Header(default=None)):
+    def list_sub2api_servers(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"servers": sanitize_sub2api_servers(sub2api_config.list_servers())}
 
     @router.post("/api/sub2api/servers")
-    async def create_sub2api_server(body: Sub2APIServerCreateRequest, authorization: str | None = Header(default=None)):
+    def create_sub2api_server(body: Sub2APIServerCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         if not body.base_url.strip():
             raise HTTPException(status_code=400, detail={"error": "base_url is required"})
@@ -2325,7 +2356,7 @@ def create_router() -> APIRouter:
         return {"server": sanitize_sub2api_server(server), "servers": sanitize_sub2api_servers(sub2api_config.list_servers())}
 
     @router.post("/api/sub2api/servers/{server_id}")
-    async def update_sub2api_server(server_id: str, body: Sub2APIServerUpdateRequest, authorization: str | None = Header(default=None)):
+    def update_sub2api_server(server_id: str, body: Sub2APIServerUpdateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             server = sub2api_config.update_server(server_id, body.model_dump(exclude_none=True))
@@ -2339,7 +2370,7 @@ def create_router() -> APIRouter:
         return {"server": sanitize_sub2api_server(server), "servers": sanitize_sub2api_servers(sub2api_config.list_servers())}
 
     @router.delete("/api/sub2api/servers/{server_id}")
-    async def delete_sub2api_server(server_id: str, authorization: str | None = Header(default=None)):
+    def delete_sub2api_server(server_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         try:
             deleted = sub2api_config.delete_server(server_id)
@@ -2353,19 +2384,19 @@ def create_router() -> APIRouter:
         return {"servers": sanitize_sub2api_servers(sub2api_config.list_servers())}
 
     @router.get("/api/sub2api/servers/{server_id}/groups")
-    async def sub2api_server_groups(server_id: str, authorization: str | None = Header(default=None)):
+    def sub2api_server_groups(server_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
             raise HTTPException(status_code=404, detail={"error": "server not found"})
         try:
-            groups = await run_in_threadpool(sub2api_list_remote_groups, server)
+            groups = sub2api_list_remote_groups(server)
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
         return {"server_id": server_id, "groups": groups}
 
     @router.get("/api/sub2api/servers/{server_id}/accounts")
-    async def sub2api_server_accounts(
+    def sub2api_server_accounts(
         server_id: str,
         group_id: str | None = Query(default=None),
         authorization: str | None = Header(default=None),
@@ -2377,13 +2408,13 @@ def create_router() -> APIRouter:
         if group_id is not None:
             server = {**server, "group_id": group_id}
         try:
-            accounts = await run_in_threadpool(sub2api_list_remote_accounts, server)
+            accounts = sub2api_list_remote_accounts(server)
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
         return {"server_id": server_id, "accounts": accounts}
 
     @router.post("/api/sub2api/servers/{server_id}/import")
-    async def sub2api_server_import(server_id: str, body: Sub2APIImportRequest, authorization: str | None = Header(default=None)):
+    def sub2api_server_import(server_id: str, body: Sub2APIImportRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
@@ -2403,7 +2434,7 @@ def create_router() -> APIRouter:
         return {"import_job": job}
 
     @router.get("/api/sub2api/servers/{server_id}/import")
-    async def sub2api_server_import_progress(server_id: str, authorization: str | None = Header(default=None)):
+    def sub2api_server_import_progress(server_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:

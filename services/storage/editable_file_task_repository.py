@@ -147,6 +147,19 @@ class EditableFileTaskRepository:
         finally:
             session.close()
 
+    def list_finished_before(self, statuses: set[str], cutoff_ts: float) -> list[dict[str, Any]]:
+        if not statuses:
+            return []
+        session = self.Session()
+        try:
+            rows = session.query(EditableFileTaskModel).filter(
+                EditableFileTaskModel.status.in_(sorted(statuses)),
+                EditableFileTaskModel.updated_ts < float(cutoff_ts),
+            ).all()
+            return [self._task_from_row(row) for row in rows]
+        finally:
+            session.close()
+
     def list_delete_pending(self) -> list[dict[str, Any]]:
         session = self.Session()
         try:

@@ -421,6 +421,26 @@ export function accountOperationPollDelayMs(elapsedMs: number) {
   return 2_000
 }
 
+const ACCOUNT_OPERATION_MAX_TRACKING_MS = 6 * 60 * 60 * 1000
+const ACCOUNT_OPERATION_STALL_MS = 15 * 60 * 1000
+const ACCOUNT_OPERATION_MAX_POLL_FAILURES = 8
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw new DOMException('账号操作进度跟踪已取消', 'AbortError')
+}
+
+function waitForPoll(delayMs: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    const timer = window.setTimeout(done, delayMs)
+    signal?.addEventListener('abort', done, { once: true })
+    function done() {
+      window.clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+  })
+}
+
 async function pollAccountOperation(
   endpoint:
     | '/api/accounts/sync'
@@ -433,8 +453,10 @@ async function pollAccountOperation(
     targetCount?: number
     method?: 'POST' | 'DELETE'
     extraPayload?: Record<string, unknown>
+    signal?: AbortSignal
   },
 ) {
+  const signal = options?.signal
   const selection = selectionPayload(target)
   const explicitCount = 'account_ids' in selection ? selection.account_ids.length : 0
   const targetCount = Math.max(0, Number(options?.targetCount || explicitCount))
@@ -452,13 +474,37 @@ async function pollAccountOperation(
   if (!progressId) return { status: 'ok', progress: null as AccountOperationProgress | null }
 
   const startedAt = Date.now()
-  const deadline = startedAt + (
-    targetCount > 100 ? 12 * 60 * 60 * 1000 : Math.max(90_000, targetCount * 15_000)
+  const deadline = startedAt + Math.min(
+    ACCOUNT_OPERATION_MAX_TRACKING_MS,
+    Math.max(90_000, targetCount * 15_000),
   )
+  let consecutiveFailures = 0
+  let lastProcessed = -1
+  let lastAdvancedAt = startedAt
   while (Date.now() < deadline) {
-    const rawProgress = await apiClient.get<never, AccountOperationProgress>(
-      `/api/accounts/operations/${encodeURIComponent(progressId)}`,
-    )
+    throwIfAborted(signal)
+    let rawProgress: AccountOperationProgress
+    try {
+      rawProgress = await apiClient.get<never, AccountOperationProgress>(
+        `/api/accounts/operations/${encodeURIComponent(progressId)}`,
+        { signal },
+      )
+      consecutiveFailures = 0
+    } catch (error) {
+      throwIfAborted(signal)
+      // The operation keeps running on the server; one failed poll must not end tracking.
+      const status = Number((error as { status?: number } | null)?.status || 0)
+      const retryable = !status || status >= 500 || status === 408 || status === 429
+      consecutiveFailures += 1
+      if (status === 404) {
+        throw new Error('账号操作进度已不存在（服务可能已重启），请刷新列表查看结果')
+      }
+      if (!retryable || consecutiveFailures > ACCOUNT_OPERATION_MAX_POLL_FAILURES) {
+        throw new Error('无法获取账号操作进度，后台可能仍在执行，请稍后刷新列表查看结果')
+      }
+      await waitForPoll(Math.min(10_000, 1_000 * 2 ** Math.min(3, consecutiveFailures - 1)), signal)
+      continue
+    }
     const progress = {
       ...rawProgress,
       ...accountOperationPresentation(rawProgress),
@@ -468,10 +514,14 @@ async function pollAccountOperation(
       if (progress.error) throw new Error(progress.error)
       return { status: 'ok', progress }
     }
-    await new Promise((resolve) => window.setTimeout(
-      resolve,
-      accountOperationPollDelayMs(Date.now() - startedAt),
-    ))
+    const processed = Number(progress.processed || 0)
+    if (processed !== lastProcessed) {
+      lastProcessed = processed
+      lastAdvancedAt = Date.now()
+    } else if (Date.now() - lastAdvancedAt > ACCOUNT_OPERATION_STALL_MS) {
+      throw new Error('账号操作长时间没有进度，后台可能仍在执行，请稍后刷新列表查看结果')
+    }
+    await waitForPoll(accountOperationPollDelayMs(Date.now() - startedAt), signal)
   }
 
   throw new Error('账号操作超时，请稍后重新打开列表查看结果')
@@ -762,13 +812,15 @@ export const accountsApi = {
     target: AccountSelectionTarget,
     onProgress?: (progress: AccountOperationProgress) => void,
     targetCount?: number,
-  ) => pollAccountOperation('/api/accounts/sync', target, onProgress, { targetCount }),
+    signal?: AbortSignal,
+  ) => pollAccountOperation('/api/accounts/sync', target, onProgress, { targetCount, signal }),
 
   refreshAccessTokensWithProgress: (
     target: AccountSelectionTarget,
     onProgress?: (progress: AccountOperationProgress) => void,
     targetCount?: number,
-  ) => pollAccountOperation('/api/accounts/refresh-access-token', target, onProgress, { targetCount }),
+    signal?: AbortSignal,
+  ) => pollAccountOperation('/api/accounts/refresh-access-token', target, onProgress, { targetCount, signal }),
 
   previewSelection: (selection: AccountSelectionScope) =>
     apiClient.post<

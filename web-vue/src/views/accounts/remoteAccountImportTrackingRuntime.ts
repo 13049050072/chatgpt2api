@@ -137,6 +137,18 @@ export function useRemoteAccountImportTrackingRuntime(
     notifyFinished()
   }
 
+  async function stopWithError(
+    request: RemoteAccountImportStarted,
+    revision: number,
+    error: string,
+  ) {
+    if (revision !== remoteImportTrackingRevision) return
+    remoteImportTrackingKey = ''
+    lastRemoteImportRequest = null
+    await updateProgress({ ...request, job: null, error })
+    notifyFinished()
+  }
+
   async function pollImportJob(request: RemoteAccountImportStarted, revision: number) {
     const startedAt = Date.now()
     const deadline = startedAt + (options.trackingWindowMs || remoteImportTrackingWindowMs)(request.total)
@@ -152,9 +164,22 @@ export function useRemoteAccountImportTrackingRuntime(
           await finishTracking(request, job, revision)
           return
         }
+        if (!job && request.job?.job_id) {
+          await stopWithError(request, revision, '导入任务已不存在，已停止跟踪')
+          return
+        }
         await updateProgress({ ...request, job })
-      } catch {
+      } catch (error) {
         if (revision !== remoteImportTrackingRevision) return
+        const status = Number((error as { status?: number } | null)?.status || 0)
+        if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+          await stopWithError(
+            request,
+            revision,
+            status === 404 ? '导入来源已被删除，已停止跟踪' : '无法读取导入进度，已停止跟踪',
+          )
+          return
+        }
         consecutiveFailures += 1
         const current = options.bulkProgress.refreshProgress.value
         options.bulkProgress.update({

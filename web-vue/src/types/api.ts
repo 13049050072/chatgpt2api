@@ -98,6 +98,7 @@ export interface Settings {
     has_api_key: boolean
     model: string
     prompt: string
+    fail_open: boolean
   }
   image_storage: {
     enabled: boolean

@@ -18,9 +18,11 @@ from services.config import DATA_DIR
 from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.openai_backend_api import EDITABLE_FILE_MODEL, OpenAIBackendAPI
+from services.runtime_configuration import env_int
 from services.storage.editable_file_task_repository import EditableFileTaskRepository
 from utils.file_names import is_safe_public_filename
 from utils.helper import new_uuid
+from utils.log import logger
 from utils.timezone import beijing_from_timestamp, beijing_now_str
 
 TASK_STATUS_QUEUED = "queued"
@@ -61,6 +63,11 @@ EDITABLE_FILE_EXTENSIONS = {
     "ppt": {".ppt", ".pptx", ".zip"},
     "psd": {".psd", ".zip"},
 }
+EDITABLE_FILE_ACTIVE_TASK_LIMIT = env_int("CHATGPT2API_EDITABLE_FILE_TASK_LIMIT", 4, maximum=64)
+EDITABLE_FILE_RETENTION_HOURS = env_int("CHATGPT2API_EDITABLE_FILE_RETENTION_HOURS", 168)
+EDITABLE_FILE_CLEANUP_INTERVAL_SECS = 3600.0
+EDITABLE_FILE_MAX_IMAGES = 16
+EDITABLE_FILE_MAX_IMAGE_BASE64_CHARS = 100 * 1024 * 1024 * 4 // 3
 
 
 def _now_iso() -> str:
@@ -190,6 +197,14 @@ class EditableFileTaskCleanupError(RuntimeError):
     pass
 
 
+class EditableFileTaskInputError(ValueError):
+    pass
+
+
+class EditableFileTaskQueueFullError(RuntimeError):
+    pass
+
+
 class EditableFileTaskService:
     def __init__(
         self,
@@ -201,9 +216,39 @@ class EditableFileTaskService:
             raise ValueError("provide repository or database_url, not both")
         self._lock = threading.RLock()
         self._repository = repository or EditableFileTaskRepository(database_url)
+        self._active_slots = threading.BoundedSemaphore(EDITABLE_FILE_ACTIVE_TASK_LIMIT)
+        self._last_cleanup_at = 0.0
         with self._lock:
             self._recover_pending_deletions_locked()
             self._recover_unfinished_locked()
+        self._cleanup_expired_if_due()
+
+    def _cleanup_expired_if_due(self) -> None:
+        now = time.monotonic()
+        if self._last_cleanup_at and now - self._last_cleanup_at < EDITABLE_FILE_CLEANUP_INTERVAL_SECS:
+            return
+        self._last_cleanup_at = now
+        try:
+            self.cleanup_expired()
+        except Exception as exc:
+            logger.warning({"event": "editable_file_cleanup_failed", "error_type": exc.__class__.__name__})
+
+    def cleanup_expired(self, now: float | None = None) -> int:
+        """Delete finished tasks and their files once the retention window passes."""
+        cutoff = (time.time() if now is None else now) - EDITABLE_FILE_RETENTION_HOURS * 3600
+        removed = 0
+        with self._lock:
+            for task in self._repository.list_finished_before(TERMINAL_STATUSES, cutoff):
+                owner = _clean(task.get("owner_id"))
+                task_id = _clean(task.get("id"))
+                if not owner or not task_id:
+                    continue
+                if not task.get("delete_pending"):
+                    task = self._repository.update(owner, task_id, delete_pending=True) or task
+                if self._remove_task_files(task, strict=False):
+                    self._repository.delete(owner, task_id)
+                    removed += 1
+        return removed
 
     def submit_ppt(self, identity: dict[str, object], *, client_task_id: str = "", prompt: str = "", base64_images: list[str] | None = None, base_url: str = "") -> dict[str, Any]:
         return self._submit(identity, client_task_id=client_task_id, kind="ppt", prompt=prompt, base64_images=base64_images or [], base_url=base_url)
@@ -261,27 +306,55 @@ class EditableFileTaskService:
 
     def _submit(self, identity: dict[str, object], *, client_task_id: str, kind: str, prompt: str, base64_images: list[str], base_url: str) -> dict[str, Any]:
         task_id = _resolve_task_id(client_task_id)
+        if len(base64_images) > EDITABLE_FILE_MAX_IMAGES:
+            raise EditableFileTaskInputError(f"at most {EDITABLE_FILE_MAX_IMAGES} images are supported")
+        if sum(len(str(item or "")) for item in base64_images) > EDITABLE_FILE_MAX_IMAGE_BASE64_CHARS:
+            raise EditableFileTaskInputError("combined images exceed 100MB")
         owner = _owner_id(identity)
         key = _task_key(owner, task_id)
-        now = _now_iso()
         with self._lock:
-            ts = time.time()
-            task, created = self._repository.create({
-                "id": task_id,
-                "storage_id": f"{EDITABLE_FILE_STORAGE_PREFIX}{new_uuid()}",
-                "owner_id": owner,
-                "status": TASK_STATUS_QUEUED,
-                "kind": kind,
-                "model": EDITABLE_FILE_MODEL,
-                "created_at": now,
-                "updated_at": now,
-                "created_ts": ts,
-                "updated_ts": ts,
-            })
-            if not created:
-                return _public_task(task)
-        threading.Thread(target=self._run_task, args=(key, kind, prompt, base64_images, dict(identity), base_url), name=f"{kind}-file-task-{task_id[:16]}", daemon=True).start()
-        return _public_task(task)
+            existing = self._repository.get(owner, task_id)
+        if existing is not None:
+            return _public_task(existing)
+        self._cleanup_expired_if_due()
+        if not self._active_slots.acquire(blocking=False):
+            raise EditableFileTaskQueueFullError("too many editable file tasks are running; retry later")
+        started_worker = False
+        try:
+            now = _now_iso()
+            with self._lock:
+                ts = time.time()
+                task, created = self._repository.create({
+                    "id": task_id,
+                    "storage_id": f"{EDITABLE_FILE_STORAGE_PREFIX}{new_uuid()}",
+                    "owner_id": owner,
+                    "status": TASK_STATUS_QUEUED,
+                    "kind": kind,
+                    "model": EDITABLE_FILE_MODEL,
+                    "created_at": now,
+                    "updated_at": now,
+                    "created_ts": ts,
+                    "updated_ts": ts,
+                })
+                if not created:
+                    return _public_task(task)
+            threading.Thread(
+                target=self._run_task_with_slot,
+                args=(key, kind, prompt, base64_images, dict(identity), base_url),
+                name=f"{kind}-file-task-{task_id[:16]}",
+                daemon=True,
+            ).start()
+            started_worker = True
+            return _public_task(task)
+        finally:
+            if not started_worker:
+                self._active_slots.release()
+
+    def _run_task_with_slot(self, *args: Any) -> None:
+        try:
+            self._run_task(*args)
+        finally:
+            self._active_slots.release()
 
     def _run_task(self, key: str, kind: str, prompt: str, base64_images: list[str], identity: dict[str, object], base_url: str) -> None:
         started = time.time()
@@ -290,8 +363,8 @@ class EditableFileTaskService:
         staging_dir: Path | None = None
         published_dir: Path | None = None
         success_recorded = False
-        self._update_task(key, status=TASK_STATUS_RUNNING, error="", started_ts=started)
         try:
+            self._update_task(key, status=TASK_STATUS_RUNNING, error="", started_ts=started)
             if kind == "psd" and not base64_images:
                 raise ValueError("base64_images is empty")
             token = _editable_access_token()
@@ -332,7 +405,14 @@ class EditableFileTaskService:
             error = str(exc) or "editable file task failed"
             if not cleanup_succeeded:
                 error = f"{error}; generated files could not be removed"
-            self._update_task(key, status=TASK_STATUS_ERROR, error=error, account_email=account_email, ended_ts=time.time())
+            try:
+                self._update_task(key, status=TASK_STATUS_ERROR, error=error, account_email=account_email, ended_ts=time.time())
+            except Exception as update_error:
+                logger.error({
+                    "event": "editable_file_task_failure_persist_failed",
+                    "task_key": key,
+                    "error_type": update_error.__class__.__name__,
+                })
             self._log_call(identity, kind, started, request_text(prompt), status="failed", error=error, account_email=account_email)
 
     def public_file_path(self, relative_path: str) -> Path:

@@ -100,6 +100,15 @@
             >启用 AI 审核</Checkbox>
           </div>
         </div>
+        <div class="settings-check-item">
+          <div class="settings-check-control">
+            <Checkbox
+              v-model="settings.ai_review.fail_open"
+              :disabled="fieldReadOnly('ai_review.fail_open')"
+            >审核失败时放行</Checkbox>
+            <HelpTip text="审核服务超时、出错或回答不明确时放行请求；关闭后这些请求会被拒绝。" />
+          </div>
+        </div>
       </div>
 
       <FormField label="Base URL">
@@ -145,7 +154,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Button, Checkbox, FormField, FormSection, Input } from 'nanocat-ui'
+import { Button, Checkbox, FormField, FormSection, HelpTip, Input } from 'nanocat-ui'
 import type { ImageStorageTestResult } from '@/api/settings'
 import { GroupedSelectMenu } from 'nanocat-ui'
 import type { Settings } from '@/types/api'

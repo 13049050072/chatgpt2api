@@ -11,13 +11,19 @@ import uuid
 from typing import Protocol
 
 from services.account_operation_events import (
+    IMPORT_OUTCOMES,
     append_account_operation_event,
     append_account_operation_events,
+    import_outcome_event,
     normalize_account_operation_events,
     project_account_operation_presentation,
 )
 from services.account_service import account_service
-from services.remote_import_job_status import import_job_is_active
+from services.remote_import_job_status import (
+    import_job_is_active,
+    import_job_is_stale,
+    import_job_status_is_active,
+)
 from utils.diagnostics import sanitize_diagnostic_text
 
 
@@ -38,6 +44,7 @@ _IMPORT_JOB_STAGE_LABELS = {
 _CHECKPOINT_INTERVAL_SECONDS = 0.25
 _CHECKPOINT_ITEM_COUNT = 20
 _ERROR_DETAILS_LIMIT = 20
+_SYNC_BATCH_SIZE = 100
 
 
 class ImportJobFailureAccumulator:
@@ -122,7 +129,7 @@ def resolve_import_item_statuses(raw_result: object, total: int) -> list[str]:
     raw_statuses = result.get("item_results")
     if isinstance(raw_statuses, list) and len(raw_statuses) == bounded_total:
         statuses = [str(status or "").strip().lower() for status in raw_statuses]
-        if all(status in {"added", "skipped", "invalid"} for status in statuses):
+        if all(status in IMPORT_OUTCOMES for status in statuses):
             return statuses
 
     added = max(0, min(bounded_total, int(result.get("added") or 0)))
@@ -318,6 +325,22 @@ ImportErrorContextProvider = Callable[..., dict[str, tuple[str, ...]]]
 RemoteImportAccount = tuple[str, dict]
 
 
+def _retained_access_token(payload: dict) -> str:
+    """Current token of the account an imported credential landed in.
+
+    An older credential for an existing account is skipped rather than applied, so
+    syncing its own token would fail; the account that was kept must be synced.
+    """
+    token = _clean(payload.get("access_token"))
+    if not token:
+        return ""
+    account = account_service.get_account_by_token_identity(
+        token,
+        source_type=_clean(payload.get("source_type")) or "web",
+    )
+    return _clean((account or {}).get("access_token")) or token
+
+
 def _import_account_label(account_id: object, payload: object = None) -> str:
     if isinstance(payload, dict):
         email = _clean(payload.get("email"))
@@ -390,6 +413,7 @@ class RemoteAccountImportJob:
             "total": self._total,
             "completed": 0,
             "added": 0,
+            "updated": 0,
             "skipped": 0,
             "synced": 0,
             "failed": 0,
@@ -542,10 +566,15 @@ class RemoteAccountImportJob:
         try:
             target(*args, **kwargs)
         except Exception:
-            self.fail(
-                name=self._worker_label,
-                error="remote import worker failed",
-            )
+            for delay in (0.5, 2.0, 5.0, None):
+                try:
+                    if self.fail(name=self._worker_label, error="remote import worker failed"):
+                        return
+                except Exception:
+                    pass
+                if delay is None:
+                    return
+                time.sleep(delay)
 
     def finish(self, fetched_accounts: list[RemoteImportAccount]) -> bool:
         if not fetched_accounts:
@@ -662,20 +691,8 @@ class RemoteAccountImportJob:
                     "account_id": account_id,
                     "account_label": _import_account_label(account_id, payload),
                     "action": "import_account",
-                    "status": (
-                        "success"
-                        if status == "added"
-                        else "failed"
-                        if status == "invalid"
-                        else "skipped"
-                    ),
-                    "message": (
-                        "账号导入成功"
-                        if status == "added"
-                        else "账号数据无效，未导入"
-                        if status == "invalid"
-                        else "账号已存在，凭据已更新"
-                    ),
+                    "status": import_outcome_event(status)[0],
+                    "message": import_outcome_event(status)[1],
                 }
                 for (account_id, payload), status in zip(
                     fetched_accounts,
@@ -702,7 +719,9 @@ class RemoteAccountImportJob:
             )
             if status != "invalid"
         ]
-        tokens = [_clean(payload.get("access_token")) for payload in sync_payloads]
+        tokens = list(dict.fromkeys(
+            token for payload in sync_payloads if (token := _retained_access_token(payload))
+        ))
         if self.update(
             expected_job_id=self._job_id,
             stage="sync_accounts",
@@ -712,12 +731,22 @@ class RemoteAccountImportJob:
             return False
 
         try:
-            sync_result = (
-                account_service.sync_accounts_and_quota(tokens)
-                if tokens
-                else {"synced": 0, "errors": []}
-            )
-            raw_sync_errors = list(sync_result.get("errors") or [])
+            synced_total = 0
+            raw_sync_errors = []
+            for start in range(0, len(tokens), _SYNC_BATCH_SIZE):
+                batch = tokens[start:start + _SYNC_BATCH_SIZE]
+                batch_result = account_service.sync_accounts_and_quota(batch)
+                synced_total += int(batch_result.get("synced") or 0)
+                raw_sync_errors.extend(batch_result.get("errors") or [])
+                try:
+                    self.update(
+                        expected_job_id=self._job_id,
+                        stage_completed=start + len(batch),
+                    )
+                except Exception:
+                    # Progress is advisory; the remaining batches must still sync.
+                    pass
+            sync_result = {"synced": synced_total}
             sync_errors = [
                 normalize_import_error(
                     item,
@@ -774,6 +803,7 @@ class RemoteAccountImportJob:
             stage_completed=self._total,
             completed=self._total,
             added=int(add_result.get("added") or 0),
+            updated=int(add_result.get("updated") or 0),
             skipped=int(add_result.get("skipped") or 0),
             synced=int(sync_result.get("synced") or 0),
             failed_total=self._failures.total,
@@ -794,7 +824,8 @@ def normalize_import_job(
     sensitive_values = tuple(sensitive_values)
     proxy_values = tuple(proxy_values)
     status = _clean(raw.get("status")) or "failed"
-    if fail_unfinished and import_job_is_active(raw):
+    stale = import_job_is_stale(raw)
+    if (fail_unfinished or stale) and import_job_status_is_active(raw):
         status = "failed"
     stage = _clean(raw.get("stage")).lower()
     if stage not in _IMPORT_JOB_STAGES:
@@ -854,9 +885,10 @@ def normalize_import_job(
         _clean(errors[0].get("error")) if status == "failed" and errors else ""
     )
     if status == "failed" and not error:
-        error = "导入失败"
+        error = "导入任务长时间没有进度，已停止跟踪" if stale else "导入失败"
     import_result = {
         "added": max(0, int(raw.get("added") or 0)),
+        "updated": max(0, int(raw.get("updated") or 0)),
         "skipped": max(0, int(raw.get("skipped") or 0)),
         "synced": max(
             0,
@@ -900,6 +932,7 @@ def normalize_import_job(
         "total": total,
         "completed": completed,
         "added": import_result["added"],
+        "updated": import_result["updated"],
         "skipped": import_result["skipped"],
         "synced": import_result["synced"],
         # `failed` stays as the backwards-compatible count. New consumers can

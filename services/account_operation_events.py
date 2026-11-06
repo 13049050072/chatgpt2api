@@ -18,6 +18,19 @@ _STATUS_TONES = {
     "skipped": "warning",
 }
 _ACTION_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_IMPORT_OUTCOME_EVENTS = {
+    "added": ("success", "账号导入成功"),
+    "updated": ("success", "账号已存在，凭据已更新"),
+    "skipped": ("skipped", "账号已存在，凭据未变化"),
+    "stale": ("skipped", "账号已存在，已有更新的凭据，未覆盖"),
+    "invalid": ("failed", "账号数据无效，未导入"),
+}
+IMPORT_OUTCOMES = frozenset(_IMPORT_OUTCOME_EVENTS)
+
+
+def import_outcome_event(outcome: str) -> tuple[str, str]:
+    """Event status and message for one imported credential's outcome."""
+    return _IMPORT_OUTCOME_EVENTS.get(outcome, _IMPORT_OUTCOME_EVENTS["skipped"])
 
 
 def _now_iso() -> str:
@@ -106,7 +119,8 @@ def project_account_operation_presentation(
         failed = _count(imported.get("failed"))
         summary_items = [
             _summary_item("added", "新增", _count(imported.get("added"))),
-            _summary_item("skipped", "更新 / 跳过", _count(imported.get("skipped"))),
+            _summary_item("updated", "凭据更新", _count(imported.get("updated"))),
+            _summary_item("skipped", "跳过", _count(imported.get("skipped"))),
             _summary_item("synced", "同步", _count(imported.get("synced"))),
             _summary_item("failed", "失败", failed, tone="danger" if failed else ""),
         ]

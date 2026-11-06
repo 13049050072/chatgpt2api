@@ -515,6 +515,7 @@
                       @update:model-value="accountGroupForm.enabled = Boolean($event)"
                     />
                     启用账号组
+                    <HelpTip text="停用后组内账号不参与对话和生图调度；刷新、检测等账号请求仍使用该组的出口代理。" />
                   </SurfaceBox>
 
                   <label class="block text-xs">
@@ -780,7 +781,7 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
-import { Button, Checkbox, EmptyState, GroupedSelectMenu, Input, TableShell, ViewModeSwitch } from 'nanocat-ui'
+import { Button, Checkbox, EmptyState, GroupedSelectMenu, HelpTip, Input, TableShell, ViewModeSwitch } from 'nanocat-ui'
 import type { Account } from '@/api/accounts'
 import FilterToolbar from '@/components/ai/FilterToolbar.vue'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'

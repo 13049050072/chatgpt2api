@@ -186,7 +186,11 @@ def image_task_row(
         "public_error": public_error,
         "results": results,
         "actions": {
-            "resume_poll": status == "failed" and raw.get("can_resume_poll") is True,
+            "resume_poll": (
+                status == "failed"
+                and raw.get("can_resume_poll") is True
+                and bool(_text(raw.get("upstream_account_id")))
+            ),
         },
     }
 

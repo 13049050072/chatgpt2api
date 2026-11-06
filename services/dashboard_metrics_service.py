@@ -468,13 +468,16 @@ class DashboardMetricsService:
                         if attempt >= 2:
                             raise
                 raise RuntimeError("dashboard metrics synchronization did not converge")
-            except Exception:
-                self._ingest_failed = True
-                self._stale_reason = "log_cursor_sync_failed"
-                try:
-                    self.repository.mark_degraded(self._stale_reason)
-                except Exception:
-                    pass
+            except Exception as exc:
+                # Writes are transactional, so a transient failure leaves the cursor and
+                # buckets intact; only a source mismatch needs the destructive rebuild.
+                if force_rebuild or isinstance(exc, (LogCursorMismatch, DashboardMetricsSourceChanged)):
+                    self._ingest_failed = True
+                    self._stale_reason = "log_cursor_sync_failed"
+                    try:
+                        self.repository.mark_degraded(self._stale_reason)
+                    except Exception:
+                        pass
                 raise
 
     def sync_from_logs(self, items: Iterable[dict[str, Any]]) -> bool:

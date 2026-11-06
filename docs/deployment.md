@@ -102,6 +102,30 @@ Application Database：SQLite 使用 `data/application-database.sqlite3`，Postg
 使用 `data/application-database.pgdump`。图片任务记录、PPT / PSD 文件和图片目录
 按备份设置选择；外部 WebDAV 仍需独立备份。
 
+备份归档包含全部账号凭据，建议在备份设置中启用加密。加密备份以 `.tar.gz.enc`
+结尾，使用 OpenSSL AES-256-CBC 与 PBKDF2-SHA256（600000 次迭代）；对象元数据
+`x-amz-meta-kdf` 记录迭代次数，`x-amz-meta-ciphertext-hmac-sha256` 记录密文的
+HMAC-SHA256。恢复前先计算 HMAC，与元数据一致后再解密：
+
+```bash
+export CHATGPT2API_BACKUP_PASSPHRASE='<加密口令>'
+python3 - backup-xxx.tar.gz.enc <<'PY'
+import hashlib, hmac, os, sys
+with open(sys.argv[1], "rb") as source:
+    header = source.read(16)
+    key = hashlib.pbkdf2_hmac("sha256", os.environ["CHATGPT2API_BACKUP_PASSPHRASE"].encode(),
+                              b"chatgpt2api-backup-hmac-v1" + header[8:], 600000)
+    mac = hmac.new(key, header, hashlib.sha256)
+    for chunk in iter(lambda: source.read(1 << 20), b""):
+        mac.update(chunk)
+print(mac.hexdigest())
+PY
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 \
+  -in backup-xxx.tar.gz.enc -out backup.tar.gz -pass env:CHATGPT2API_BACKUP_PASSPHRASE
+```
+
+没有 `x-amz-meta-kdf` 元数据的旧加密备份不含 HMAC，解密时去掉 `-iter 600000`。
+
 未配置 R2 时，应先停止服务再备份。SQLite 可以在停服后复制 `data/chatgpt2api.db`；
 PostgreSQL 必须使用 `pg_dump --format=custom`，不能用 `tar data/` 代替数据库备份。
 `config.json` 只保留 `auth-key` 等启动配置，也应单独保存：

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from curl_cffi import requests
+from curl_cffi import CurlMime, requests
 from fastapi import HTTPException
 from PIL import Image
 
@@ -262,14 +262,25 @@ def push_gallery_image(relative_path: str, *, metadata: Mapping[str, Any] | None
                 value = metadata.get(key) if isinstance(metadata, Mapping) else None
                 if value is not None and str(value).strip():
                     data[key] = str(value)
-            response = session.post(
-                f"{str(settings['base_url']).rstrip('/')}/api/sync/push",
-                headers=headers,
-                files={"image": (Path(rel).name, payload, "application/octet-stream")},
-                data=data,
-                timeout=timeout,
-                allow_redirects=False,
-            )
+            # curl_cffi rejects requests-style files=; uploads go through CurlMime.
+            multipart = CurlMime()
+            try:
+                multipart.addpart(
+                    name="image",
+                    content_type="application/octet-stream",
+                    filename=Path(rel).name,
+                    data=payload,
+                )
+                response = session.post(
+                    f"{str(settings['base_url']).rstrip('/')}/api/sync/push",
+                    headers=headers,
+                    data=data,
+                    multipart=multipart,
+                    timeout=timeout,
+                    allow_redirects=False,
+                )
+            finally:
+                multipart.close()
         except GenBoxPushError:
             raise
         except Exception as exc:

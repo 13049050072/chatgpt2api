@@ -40,7 +40,7 @@ from services.realtime_monitor_service import realtime_monitor_service
 from services.storage.file_lock import interprocess_lock
 from utils.diagnostics import exception_diagnostic_fields
 from utils.log import logger
-from utils.timezone import beijing_from_timestamp, beijing_now_str
+from utils.timezone import BEIJING_TZ, beijing_from_timestamp, beijing_now_str
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_RUNNING = "running"
@@ -181,15 +181,19 @@ def _now_iso() -> str:
 def _timestamp(value: object) -> float:
     if not isinstance(value, str) or not value.strip():
         return 0.0
+    # Naive task times are written by beijing_now_str(), not in host local time.
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
         try:
-            return datetime.strptime(value[:26], fmt).timestamp()
+            return datetime.strptime(value[:26], fmt).replace(tzinfo=BEIJING_TZ).timestamp()
         except ValueError:
             continue
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except Exception:
         return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=BEIJING_TZ)
+    return parsed.timestamp()
 
 
 def _clean(value: object, default: str = "") -> str:
@@ -741,7 +745,6 @@ class ImageTaskService:
             role=str(identity.get("role") or ""),
             key_name=str(identity.get("name") or ""),
         )
-        self._update_task(key, status=TASK_STATUS_RUNNING, error="")
         # 创建进度回调，每个步骤完成后更新任务状态
         def progress_callback(step: str) -> None:
             updates: dict[str, Any] = {"progress": step}
@@ -770,6 +773,7 @@ class ImageTaskService:
             model=model,
         )
         try:
+            self._update_task(key, status=TASK_STATUS_RUNNING, error="")
             handler = self.edit_handler if mode == "edit" else self.generation_handler
             result = handler(payload_with_progress)
             perf_timings["handler_exec_ms"] = int((time.perf_counter() - handler_started) * 1000)
@@ -829,11 +833,20 @@ class ImageTaskService:
             public_error, raw_error, error_details = _normalize_task_failure(exc, "image task failed")
             account_email = _clean(getattr(exc, "account_email", ""))
             conversation_id = _clean(getattr(exc, "conversation_id", ""))
+            upstream_account_id = _clean(getattr(exc, "account_id", ""))
             duration_ms = int((time.time() - started) * 1000)
-            self._update_task(key, status=TASK_STATUS_ERROR, error=public_error, data=[],
-                              duration_ms=duration_ms,
-                              **({"conversation_id": conversation_id} if conversation_id else {}),
-                              **_task_detail_fields(error_details))
+            try:
+                self._update_task(key, status=TASK_STATUS_ERROR, error=public_error, data=[],
+                                  duration_ms=duration_ms,
+                                  **({"conversation_id": conversation_id} if conversation_id else {}),
+                                  **({"upstream_account_id": upstream_account_id} if upstream_account_id else {}),
+                                  **_task_detail_fields(error_details))
+            except Exception as update_error:
+                logger.error({
+                    "event": "image_task_failure_persist_failed",
+                    "task_key": key,
+                    "error_type": update_error.__class__.__name__,
+                })
             self._log_call(
                 identity,
                 mode,
@@ -974,6 +987,11 @@ class ImageTaskService:
             usage = item.get("usage")
             if isinstance(usage, dict):
                 task["usage"] = usage
+            # Resuming a timed-out poll after a restart needs both ids.
+            for name in ("conversation_id", "upstream_account_id"):
+                value = _clean(item.get(name))
+                if value:
+                    task[name] = value
             _copy_task_details(item, task)
             if status == TASK_STATUS_ERROR:
                 stored_error = _clean(item.get("error"))
@@ -1056,6 +1074,8 @@ class ImageTaskService:
             conversation_id = _clean(task.get("conversation_id"))
             if not conversation_id:
                 raise ValueError("task has no conversation_id")
+            if not _clean(task.get("upstream_account_id")):
+                raise ValueError("task has no upstream account to resume")
             mode = task.get("mode", "generate")
             model = task.get("model", "gpt-image-2")
             base_url = _clean(task.get("base_url"))
@@ -1108,16 +1128,33 @@ class ImageTaskService:
         """后台线程：继续轮询已有 conversation_id 的图片结果。"""
         started = submitted_wall
         handler_queue_ms = max(0, int((time.perf_counter() - submitted_perf) * 1000))
-        self._update_task(key, status=TASK_STATUS_RUNNING)
         backend = None
-        with self._lock:
-            request_payload = dict(self._tasks.get(key) or {})
-        request_payload["response_format"] = "b64_json"
+        request_payload: dict[str, Any] = {}
         try:
+            self._update_task(key, status=TASK_STATUS_RUNNING)
+            with self._lock:
+                request_payload = dict(self._tasks.get(key) or {})
+            request_payload["response_format"] = "url"
+            upstream_account_id = _clean(request_payload.get("upstream_account_id"))
+            from services.account_service import account_service
             from services.openai_backend_api import OpenAIBackendAPI
             from services.protocol.conversation import format_image_result
 
-            backend = OpenAIBackendAPI()
+            # The conversation belongs to the account that started it; an
+            # anonymous client cannot read it.
+            account = account_service.get_account_by_id(upstream_account_id) if upstream_account_id else None
+            access_token = _clean((account or {}).get("access_token"))
+            if not access_token:
+                raise ImageGenerationError(
+                    "原任务的上游账号已不可用，无法继续轮询",
+                    failure=image_failure("no_available_account"),
+                )
+            access_token = account_service.ensure_access_token(
+                access_token,
+                event="image_task_resume_poll",
+                image_scope=True,
+            )
+            backend = OpenAIBackendAPI(access_token=access_token)
             file_ids, sediment_ids = backend._poll_image_results(
                 conversation_id,
                 extra_timeout_secs,
@@ -1145,7 +1182,7 @@ class ImageTaskService:
             formatted = format_image_result(
                 image_items,
                 "",  # prompt 已不重要，结果已经拿到了
-                "b64_json",
+                "url",
                 base_url,
                 int(time.time()),
                 requested_size=size,
@@ -1182,14 +1219,21 @@ class ImageTaskService:
             if error_details.get("error_code") == "image_poll_timeout" and conversation_id:
                 error_details["can_resume_poll"] = True
             duration_ms = int((time.time() - started) * 1000)
-            self._update_task(
-                key,
-                status=TASK_STATUS_ERROR,
-                error=public_error,
-                data=[],
-                duration_ms=duration_ms,
-                **_task_detail_fields(error_details),
-            )
+            try:
+                self._update_task(
+                    key,
+                    status=TASK_STATUS_ERROR,
+                    error=public_error,
+                    data=[],
+                    duration_ms=duration_ms,
+                    **_task_detail_fields(error_details),
+                )
+            except Exception as update_error:
+                logger.error({
+                    "event": "image_task_failure_persist_failed",
+                    "task_key": key,
+                    "error_type": update_error.__class__.__name__,
+                })
             self._log_call(
                 identity,
                 mode,

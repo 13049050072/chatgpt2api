@@ -262,6 +262,34 @@ class ImageStorageService:
         self._item_lock_dir = index_file.with_suffix(index_file.suffix + ".item-locks")
         self._sync_file_lock = index_file.with_suffix(index_file.suffix + ".sync.lock")
         self._remote_delete_file = index_file.with_suffix(index_file.suffix + ".remote-deletes.json")
+        self._index_snapshot_lock = Lock()
+        self._index_snapshot: tuple[tuple[int, int, int], dict[str, dict[str, object]]] | None = None
+        self._index_write_generation = 0
+
+    def _read_index_snapshot(self) -> dict[str, dict[str, object]]:
+        """Return a read-only index view, reparsed only when the file changes.
+
+        Index writes replace the file atomically, so readers do not need the
+        mutation guard; callers must not modify the returned mapping.
+        """
+        try:
+            stat = self.index_file.stat()
+            signature: tuple[int, int, int] | None = (
+                stat.st_mtime_ns,
+                stat.st_size,
+                self._index_write_generation,
+            )
+        except OSError:
+            signature = None
+        with self._index_snapshot_lock:
+            cached = self._index_snapshot
+            if signature is not None and cached is not None and cached[0] == signature:
+                return cached[1]
+        items = self._load_clean_index()
+        if signature is not None:
+            with self._index_snapshot_lock:
+                self._index_snapshot = (signature, items)
+        return items
 
     @contextmanager
     def _index_guard(self) -> Iterator[None]:
@@ -316,7 +344,10 @@ class ImageStorageService:
         return clean
 
     def _save_index(self, items: dict[str, dict[str, object]]) -> None:
-        _write_json_object(self.index_file, {"items": items})
+        try:
+            _write_json_object(self.index_file, {"items": items})
+        finally:
+            self._index_write_generation += 1
 
     @staticmethod
     def _new_generation() -> str:
@@ -515,8 +546,7 @@ class ImageStorageService:
             raise HTTPException(status_code=404, detail="image not found")
         # File paths are not an authorization boundary: only assets registered
         # in the Gallery index may be read through this service.
-        with self._index_guard():
-            item = self._load_clean_index().get(safe_rel)
+        item = self._read_index_snapshot().get(safe_rel)
         if not isinstance(item, dict):
             raise HTTPException(status_code=404, detail="image not found")
         path = image_local_path(safe_rel)
@@ -552,9 +582,7 @@ class ImageStorageService:
         safe_rel = normalize_image_relative_path(rel)
         if not _is_image_rel(safe_rel):
             return None
-        with self._index_guard():
-            items = self._load_clean_index()
-            raw = items.get(safe_rel, {}).get("genbox_push")
+        raw = self._read_index_snapshot().get(safe_rel, {}).get("genbox_push")
         if not isinstance(raw, dict):
             return None
         status = _clean(raw.get("status"))
@@ -582,7 +610,7 @@ class ImageStorageService:
         if not remote_rels:
             return existing
 
-        items = self._load_clean_index()
+        items = self._read_index_snapshot()
         existing.update(
             safe_rel
             for safe_rel in remote_rels
@@ -592,8 +620,7 @@ class ImageStorageService:
 
     def has_local(self, rel: str) -> bool:
         safe_rel = normalize_image_relative_path(rel)
-        with self._index_guard():
-            item = self._load_clean_index().get(safe_rel)
+        item = self._read_index_snapshot().get(safe_rel)
         return bool(isinstance(item, dict) and item.get("local")) and image_local_path(safe_rel).is_file()
 
     @staticmethod

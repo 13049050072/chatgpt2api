@@ -130,7 +130,7 @@
             type="text"
             placeholder="描述局部修改要求"
             root-class="studio-inpaint-prompt-input"
-            @keydown.enter.prevent="submit"
+            @keydown.enter="handleEnterKey"
           />
           <div class="studio-inpaint-footer-actions">
             <Button
@@ -488,6 +488,13 @@ async function createEditImageFiles() {
     sourceImage: new File([sourceBlob], 'original-image.png', { type: 'image/png' }),
     markedImage: new File([markedBlob], 'marked-edit-region.png', { type: 'image/png' }),
   }
+}
+
+function handleEnterKey(event: KeyboardEvent) {
+  // Enter that confirms an IME candidate must not submit the edit.
+  if (event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  void submit()
 }
 
 async function submit() {

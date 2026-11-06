@@ -22,13 +22,14 @@ from services.storage.base import (
     StorageSnapshot,
 )
 from services.storage.mutation import item_key, normalize_items, normalize_mutation
+from utils.log import logger
 
 
 class AccountModel(DatabaseBase):
     __tablename__ = "accounts"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    access_token = Column(String(2048), unique=True, nullable=False, index=True)
+    access_token = Column(Text, unique=True, nullable=False, index=True)
     data = Column(Text, nullable=False)
 
 
@@ -54,7 +55,27 @@ class DatabaseStorageBackend(StorageBackend):
         self.database_url = database_url
         self.engine = initialize_application_database(database_url)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
+        self._widen_access_token_column()
         self._ensure_revision_rows()
+
+    def _widen_access_token_column(self) -> None:
+        """Older PostgreSQL schemas declared access_token as VARCHAR(2048)."""
+        if self.engine.dialect.name != "postgresql":
+            return
+        try:
+            with self.engine.begin() as connection:
+                data_type = connection.execute(text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = 'accounts' AND column_name = 'access_token'"
+                )).scalar()
+                if data_type == "character varying":
+                    connection.execute(text("ALTER TABLE accounts ALTER COLUMN access_token TYPE TEXT"))
+        except Exception as exc:
+            logger.warning({
+                "event": "accounts_access_token_column_widen_failed",
+                "error_type": type(exc).__name__,
+            })
 
     @staticmethod
     def _spec(collection: StorageCollection) -> tuple[type[Any], str]:

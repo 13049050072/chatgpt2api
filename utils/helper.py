@@ -190,6 +190,66 @@ class UpstreamHTTPError(RuntimeError):
         super().__init__(f"{context} failed: status={status_code}, body={body_str}")
 
 
+def _close_response_quietly(response: object) -> None:
+    try:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+    except Exception:
+        pass
+
+
+def close_response_in_background(response: object) -> None:
+    """Stop a streamed curl_cffi response without waiting for its transfer thread.
+
+    curl_cffi's close() joins the transfer thread, which only notices the stop
+    signal when the next upstream chunk arrives or the transfer times out.
+    """
+    stream_task = getattr(response, "stream_task", None)
+    if stream_task is None or stream_task.done():
+        _close_response_quietly(response)
+        return
+    try:
+        quit_now = getattr(response, "quit_now", None)
+        if quit_now is not None:
+            quit_now.set()
+    except Exception:
+        pass
+    threading.Thread(
+        target=_close_response_quietly,
+        args=(response,),
+        name="upstream-stream-close",
+        daemon=True,
+    ).start()
+
+
+_STREAM_ERROR_BODY_LIMIT = 64 * 1024
+_STREAM_ERROR_BODY_TIMEOUT_SECS = 5.0
+
+
+def _streamed_error_body(response: requests.Response) -> str:
+    stream_queue = getattr(response, "queue", None)
+    if stream_queue is None:
+        return ""
+    chunks: list[bytes] = []
+    size = 0
+    deadline = time.monotonic() + _STREAM_ERROR_BODY_TIMEOUT_SECS
+    while size < _STREAM_ERROR_BODY_LIMIT:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            chunk = stream_queue.get(timeout=remaining)
+        except queue.Empty:
+            break
+        if chunk is STREAM_END or isinstance(chunk, BaseException):
+            break
+        data = bytes(chunk)
+        chunks.append(data)
+        size += len(data)
+    return b"".join(chunks)[:_STREAM_ERROR_BODY_LIMIT].decode("utf-8", errors="replace")
+
+
 def ensure_ok(
     response: requests.Response,
     context: str,
@@ -198,11 +258,20 @@ def ensure_ok(
 ) -> None:
     if 200 <= response.status_code < 300:
         return
-    body: Any = response.text
     try:
-        body = response.json()
+        body: Any = response.text
     except Exception:
-        pass
+        body = ""
+    streamed = getattr(response, "queue", None) is not None
+    if not body and streamed:
+        body = _streamed_error_body(response)
+    if isinstance(body, str) and body:
+        try:
+            body = json.loads(body)
+        except Exception:
+            pass
+    if streamed:
+        close_response_in_background(response)
     retry_after_header = response.headers.get("Retry-After") if hasattr(response, "headers") else None
     retry_after: int | None = None
     if retry_after_header is not None:
@@ -268,6 +337,27 @@ def image_sse_stream(
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
 
+def anthropic_error_type(exc: BaseException) -> str:
+    """Map an exception to the Anthropic API error type clients use for retries."""
+    try:
+        status_code = int(getattr(exc, "status_code", 0) or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    if status_code == 429:
+        return "rate_limit_error"
+    if status_code == 401:
+        return "authentication_error"
+    if status_code == 403:
+        return "permission_error"
+    if status_code == 404:
+        return "not_found_error"
+    if status_code == 529 or status_code == 503:
+        return "overloaded_error"
+    if 400 <= status_code < 500:
+        return "invalid_request_error"
+    return "api_error"
+
+
 def anthropic_sse_stream(items) -> Iterator[str]:
     try:
         for item in items:
@@ -280,7 +370,7 @@ def anthropic_sse_stream(items) -> Iterator[str]:
             "error_type": exc.__class__.__name__,
             "error": str(exc),
         })
-        error = {"type": "error", "error": {"type": exc.__class__.__name__, "message": str(exc)}}
+        error = {"type": "error", "error": {"type": anthropic_error_type(exc), "message": str(exc)}}
         yield "event: error\n"
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
@@ -301,6 +391,7 @@ def iter_sse_payloads(
     timeout_secs = float(max_duration_secs or 0)
     pending: bytes | None = None
     aborted = False
+    completed = False
 
     def _timeout_error() -> TimeoutError:
         return TimeoutError(f"SSE stream exceeded {_format_timeout_secs(timeout_secs)}")
@@ -423,6 +514,7 @@ def iter_sse_payloads(
                 payload = line[5:].strip()
                 if payload:
                     yield payload
+        completed = True
     except Exception as exc:
         if timeout_secs > 0 and _remaining_secs() is not None and _remaining_secs() <= 0 and not isinstance(exc, TimeoutError):
             _abort_stream_nonblocking()
@@ -430,10 +522,10 @@ def iter_sse_payloads(
         raise
     finally:
         if not aborted:
-            try:
-                response.close()
-            except Exception:
-                pass
+            if completed:
+                _close_response_quietly(response)
+            else:
+                close_response_in_background(response)
 
 
 def save_images_from_text(text: str, prefix: str) -> list[Path]:
@@ -565,11 +657,26 @@ def _decode_message_image_object(item: dict[str, object]) -> tuple[bytes, str] |
     return None
 
 
-def extract_image_from_message_content(content: object) -> list[tuple[bytes, str]]:
+MESSAGE_IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
+
+
+def count_message_image_parts(content: object) -> int:
+    if not isinstance(content, list):
+        return 0
+    return sum(
+        1
+        for item in content
+        if isinstance(item, dict) and str(item.get("type") or "").strip() in MESSAGE_IMAGE_PART_TYPES
+    )
+
+
+def extract_image_from_message_content(content: object, limit: int | None = None) -> list[tuple[bytes, str]]:
     if not isinstance(content, list):
         return []
     images = []
     for item in content:
+        if limit is not None and len(images) >= limit:
+            break
         if not isinstance(item, dict):
             continue
         item_type = str(item.get("type") or "").strip()

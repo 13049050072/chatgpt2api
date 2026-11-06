@@ -11,6 +11,7 @@ from threading import Lock, RLock
 from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 
+from curl_cffi import CurlOpt
 from curl_cffi import requests as curl_requests
 
 from contracts.prompts import (
@@ -22,6 +23,7 @@ from contracts.prompts import (
 )
 from services.config import BASE_DIR
 from services.storage.prompt_library_repository import PromptLibraryRepository
+from utils.bounded_http import ResponseTooLargeError, close_streamed_response, read_response_limited
 
 
 DEFAULT_PROMPT_LIBRARY_PATH = BASE_DIR / "services" / "default_prompt_library.json"
@@ -630,15 +632,26 @@ class PromptLibraryService:
         }
         if urlparse(url).netloc.lower() == "api.github.com":
             headers["Accept"] = "application/vnd.github.raw+json"
-        response = curl_requests.get(url, headers=headers, timeout=PROMPT_REGISTRY_TIMEOUT_SECS)
-        response.raise_for_status()
-        content_length = _int_or_none(response.headers.get("content-length"))
-        if content_length is not None and content_length > max_bytes:
-            raise PromptRegistryError(f"registry response exceeds {max_bytes} bytes")
-        payload = response.content
-        if len(payload) > max_bytes:
-            raise PromptRegistryError(f"registry response exceeds {max_bytes} bytes")
-        return payload
+        # A source that stops sending is abandoned after 15 stalled seconds instead
+        # of holding the worker until the overall timeout.
+        session = curl_requests.Session(
+            curl_options={CurlOpt.LOW_SPEED_LIMIT: 1, CurlOpt.LOW_SPEED_TIME: 15},
+        )
+        try:
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=PROMPT_REGISTRY_TIMEOUT_SECS,
+                stream=True,
+            )
+            if response.status_code >= 400:
+                close_streamed_response(response)
+                response.raise_for_status()
+            return read_response_limited(response, max_bytes=max_bytes)
+        except ResponseTooLargeError as exc:
+            raise PromptRegistryError(f"registry response exceeds {max_bytes} bytes") from exc
+        finally:
+            session.close()
 
     @staticmethod
     def _registry_url(base: str, path: str) -> str:

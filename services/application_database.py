@@ -11,7 +11,7 @@ from sqlalchemy.pool import NullPool
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_DATA_DIR = ROOT_DIR / "data"
+DEFAULT_DATA_DIR = Path(os.getenv("CHATGPT2API_DATA_DIR", "").strip() or ROOT_DIR / "data").resolve()
 DatabaseBase = declarative_base()
 
 _engines: dict[str, Engine] = {}

@@ -110,7 +110,12 @@ def anthropic_error_response(
     *,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
-    error_type = "api_error" if status_code >= 500 else _default_error_type(status_code)
+    if status_code in {503, 529}:
+        error_type = "overloaded_error"
+    elif status_code >= 500:
+        error_type = "api_error"
+    else:
+        error_type = _default_error_type(status_code)
     return JSONResponse(
         status_code=status_code,
         content={

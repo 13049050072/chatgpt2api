@@ -52,7 +52,12 @@
             </MetaChip>
           </div>
           <div class="settings-prompt-source-line">
-            <a :href="source.homepage || source.url" target="_blank" rel="noreferrer" class="settings-prompt-source-url">
+            <a
+              :href="safeExternalUrl(source.homepage) || safeExternalUrl(source.url) || undefined"
+              target="_blank"
+              rel="noreferrer"
+              class="settings-prompt-source-url"
+            >
               {{ source.url }}
             </a>
           </div>
@@ -112,6 +117,7 @@ import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
 import { usePromptLibraryRuntime } from '@/composables/usePromptLibraryRuntime'
 import { useToast } from '@/composables/useToast'
+import { safeExternalUrl } from '@/lib/externalUrl'
 import { promptSyncTime } from '@/lib/promptLibrary'
 import { useSettingsPromptSourcesOperationRuntime } from '@/views/settings/settingsPromptSourcesOperationRuntime'
 

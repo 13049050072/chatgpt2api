@@ -7,7 +7,7 @@ import type {
   StudioMessageStatus,
   StudioReferenceImage,
 } from '@/components/studio/types'
-import { getJsonPreference, preferenceKeys, setJsonPreference } from '@/lib/preferences'
+import { readStoredValue, writeStoredValue } from '@/lib/preferences'
 import {
   cleanStudioSearchAnswer,
   cleanStudioText,
@@ -53,14 +53,27 @@ export function buildStudioConversationTitle(content: string) {
   return title.length > 18 ? `${title.slice(0, 18)}...` : title || '新对话'
 }
 
-export function loadStudioConversations(): StudioConversation[] {
-  const items = getJsonPreference<unknown[]>(preferenceKeys.studioConversations, [])
+function parseStoredJson<T>(raw: string | null, fallback: T): T {
+  if (!raw) return fallback
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return fallback
+  }
+}
+
+export function parseStudioConversations(raw: string | null): StudioConversation[] {
+  const items = parseStoredJson<unknown>(raw, [])
   if (!Array.isArray(items)) return []
   return items.map(normalizeStudioConversation).filter((item): item is StudioConversation => Boolean(item)).slice(0, 80)
 }
 
-export function loadStudioConversationNotices(): Record<string, StudioConversationBadgeState> {
-  const raw = getJsonPreference<Record<string, unknown>>(preferenceKeys.studioConversationBadges, {})
+export function loadStudioConversations(storageKey: string | null): StudioConversation[] {
+  return parseStudioConversations(readStoredValue(storageKey))
+}
+
+export function loadStudioConversationNotices(storageKey: string | null): Record<string, StudioConversationBadgeState> {
+  const raw = parseStoredJson<Record<string, unknown> | null>(readStoredValue(storageKey), {})
   const notices: Record<string, StudioConversationBadgeState> = {}
   Object.entries(raw || {}).forEach(([id, state]) => {
     if (state === 'done' || state === 'error') notices[id] = state
@@ -68,25 +81,86 @@ export function loadStudioConversationNotices(): Record<string, StudioConversati
   return notices
 }
 
-export function persistStudioConversations(conversations: StudioConversation[]) {
-  const payload = conversations.slice(0, 80).map((conversation) => ({
+/** saved: everything; slimmed: reference images dropped; trimmed: conversations dropped. */
+export type StudioConversationPersistStatus = 'saved' | 'slimmed' | 'trimmed' | 'failed'
+
+export type StudioConversationPersistResult = {
+  status: StudioConversationPersistStatus
+  /** Ids that are now in storage, which can be fewer than the conversations passed in. */
+  storedIds: string[]
+  /** Exact serialized value written, used to detect writes from other tabs. */
+  raw: string | null
+}
+
+function serializeStudioConversations(conversations: StudioConversation[]): StudioConversation[] {
+  return conversations.slice(0, 80).map((conversation) => ({
     ...conversation,
     messages: conversation.messages.slice(-160).map((message) => ({
       ...message,
       status: message.status === 'streaming' || message.status === 'sending' ? 'done' : message.status,
     })),
   }))
-  setJsonPreference(preferenceKeys.studioConversations, payload)
+}
+
+function withoutReferenceImageData(conversation: StudioConversation): StudioConversation {
+  if (!conversation.messages.some((message) => message.referenceImages?.length)) return conversation
+  return {
+    ...conversation,
+    messages: conversation.messages.map((message) => (
+      message.referenceImages?.length ? { ...message, referenceImages: undefined } : message
+    )),
+  }
+}
+
+export function persistStudioConversations(
+  conversations: StudioConversation[],
+  storageKey: string,
+): StudioConversationPersistResult {
+  const write = (status: StudioConversationPersistStatus, items: StudioConversation[]) => {
+    const raw = JSON.stringify(items)
+    return writeStoredValue(storageKey, raw)
+      ? { status, storedIds: items.map((item) => item.id), raw }
+      : null
+  }
+  const payload = serializeStudioConversations(conversations)
+  const saved = write('saved', payload)
+  if (saved) return saved
+
+  // Storage is full: keep text history, dropping embedded images oldest-first, then
+  // the conversations furthest down the list.
+  const newestId = payload.reduce<StudioConversation | null>(
+    (newest, item) => (!newest || item.updatedAt > newest.updatedAt ? item : newest),
+    null,
+  )?.id
+  const slimmed = write('slimmed', payload.map((item) => (item.id === newestId ? item : withoutReferenceImageData(item))))
+    || write('slimmed', payload.map(withoutReferenceImageData))
+  if (slimmed) return slimmed
+  let textOnly = payload.map(withoutReferenceImageData)
+  while (textOnly.length > 1) {
+    textOnly = textOnly.slice(0, Math.ceil(textOnly.length / 2))
+    const trimmed = write('trimmed', textOnly)
+    if (trimmed) return trimmed
+  }
+  return { status: 'failed', storedIds: [], raw: null }
+}
+
+export function isStudioConversationBusy(conversation: StudioConversation) {
+  return conversation.messages.some((message) => (
+    message.status === 'sending'
+    || message.status === 'streaming'
+    || (message.status === 'queued' && !message.taskId && !message.fileTaskId)
+  ))
 }
 
 export function persistStudioConversationNotices(
   notices: Record<string, StudioConversationBadgeState>,
   validIds: Set<string>,
+  storageKey: string,
 ) {
   const payload = Object.fromEntries(
     Object.entries(notices).filter(([id, state]) => validIds.has(id) && (state === 'done' || state === 'error')),
   )
-  setJsonPreference(preferenceKeys.studioConversationBadges, payload)
+  writeStoredValue(storageKey, JSON.stringify(payload))
 }
 
 export function buildStudioConversationLookup(conversations: StudioConversation[]): StudioConversationLookup {
@@ -199,6 +273,8 @@ function normalizeStudioMessage(item: unknown): StudioMessage | null {
     error: cleanStudioText(raw.error) || undefined,
     attachments: Array.isArray(raw.attachments) ? raw.attachments.map(cleanStudioText).filter(Boolean).slice(0, 8) : undefined,
     referenceImages: normalizeStudioReferenceImages(raw.referenceImages),
+    requestPrompt: cleanStudioText(raw.requestPrompt) || undefined,
+    requestFileCount: Number(raw.requestFileCount) > 0 ? Math.min(16, Math.trunc(Number(raw.requestFileCount))) : undefined,
     inpaintSource: normalizeStudioImageCompareSource(raw.inpaintSource),
     searchSources,
     searchImageGroups,

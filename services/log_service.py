@@ -54,6 +54,9 @@ PERF_WAIT_WARN_MS = 1000
 REQUEST_TEXT_EXCERPT_LIMIT = 1000
 REQUEST_TEXT_FULL_LIMIT = 50000
 
+CLIENT_DISCONNECTED_CODE = "client_disconnected"
+CLIENT_DISCONNECTED_MESSAGE = "客户端在输出完成前断开连接"
+
 LogService = CallRecordService
 LogCursorMismatch = CallRecordCursorMismatch
 log_service = LogService()
@@ -459,8 +462,21 @@ def _image_error_response(exc: Exception) -> JSONResponse:
     return openai_error_response(_image_error_payload(exc), failure.status_code)
 
 
+def _protocol_status_code(exc: Exception, default: int = 502) -> int:
+    try:
+        upstream_status = int(getattr(exc, "status_code", 0) or 0)
+    except (TypeError, ValueError):
+        upstream_status = 0
+    if upstream_status == 429:
+        return 429
+    if upstream_status in {503, 529}:
+        return 503
+    return default
+
+
 def _protocol_error_response(exc: Exception, status_code: int, sse: str) -> JSONResponse:
     message = str(exc)
+    status_code = _protocol_status_code(exc, status_code)
     if sse == "anthropic":
         return anthropic_error_response(message, status_code)
     return openai_error_response(message, status_code)
@@ -518,26 +534,40 @@ async def _run_image_sync(fn, *args):
     return await anyio.to_thread.run_sync(fn, *args, limiter=_image_thread_limiter)
 
 
-async def _image_stream_async(items, sender, source):
+async def _run_default_sync(fn, *args):
+    return await anyio.to_thread.run_sync(fn, *args)
+
+
+async def _stream_async(items, sender, source, *, runner=_run_image_sync, on_closed=None):
     logged_items = items
     encoded_items = sender(logged_items)
     try:
         while True:
-            has_item, chunk = await _run_image_sync(_next_item, encoded_items)
+            has_item, chunk = await runner(_next_item, encoded_items)
             if not has_item:
                 return
             yield chunk
     finally:
-        # A cancelled client must still close the underlying image generator so
-        # its account slots and upstream connections are released.
+        # A cancelled client must still close the underlying generators so
+        # account slots and upstream connections are released, and that
+        # cleanup must not run on the event loop thread.
         with anyio.CancelScope(shield=True):
             for iterator in (encoded_items, logged_items, source):
                 close = getattr(iterator, "close", None)
                 if close is not None:
                     try:
-                        await _run_image_sync(close)
+                        await runner(close)
                     except Exception as exc:
-                        logger.warning({"event": "image_stream_close_failed", "error": diagnostic_excerpt(exc, 500)})
+                        logger.warning({"event": "stream_close_failed", "error": diagnostic_excerpt(exc, 500)})
+            if on_closed is not None:
+                try:
+                    await runner(on_closed)
+                except Exception as exc:
+                    logger.warning({"event": "stream_close_callback_failed", "error": diagnostic_excerpt(exc, 500)})
+
+
+def _image_stream_async(items, sender, source, *, on_closed=None):
+    return _stream_async(items, sender, source, runner=_run_image_sync, on_closed=on_closed)
 
 
 def _next_item(items):
@@ -560,12 +590,32 @@ class LoggedCall:
     call_id: str = field(default_factory=lambda: uuid4().hex[:16])
     perf_timings: dict[str, int] = field(default_factory=dict)
     trace_metadata: dict[str, object] = field(default_factory=dict)
+    logged: bool = field(default=False, init=False, repr=False)
+
+    async def log_async(self, suffix: str, result: object = None, **kwargs: Any) -> None:
+        await run_in_threadpool(self.log, suffix, result, **kwargs)
+
+    def log_unstarted_stream(self, first: object = None) -> None:
+        """Record a stream whose client went away before the first chunk was sent.
+
+        The first chunk was already produced (for images it usually holds the
+        result), so it carries the urls, account and conversation for the record.
+        """
+        if self.logged:
+            return
+        self.log(
+            "流式调用中断",
+            first,
+            status="failed",
+            error=CLIENT_DISCONNECTED_MESSAGE,
+            extra={"error_code": CLIENT_DISCONNECTED_CODE},
+        )
 
     async def run(self, handler, *args, sse: str = "openai"):
         if not self._is_image_request():
             return await self._run(handler, *args, sse=sse)
         if not _acquire_image_request():
-            self.log("调用失败", status="failed", error="Image request capacity is full.")
+            await self.log_async("调用失败", status="failed", error="Image request capacity is full.")
             return openai_error_response({"error": {"message": "Image request capacity is full. Please retry later.", "type": "rate_limit_error", "code": "image_request_queue_full"}}, 429)
         transferred = False
         try:
@@ -624,18 +674,18 @@ class LoggedCall:
         try:
             result = await (_run_image_sync(_call_handler) if image_request else run_in_threadpool(_call_handler))
         except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=_public_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""),
-                     extra=_exception_log_fields(exc, image=image_request))
+            await self.log_async("调用失败", status="failed", error=_public_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
+                                 conversation_id=getattr(exc, "conversation_id", ""),
+                                 extra=_exception_log_fields(exc, image=image_request))
             return _image_error_response(exc)
         except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
+            await self.log_async("调用失败", status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
-            self.log("调用失败", status="failed", error=(
+            await self.log_async("调用失败", status="failed", error=(
                 _public_image_exception_message(exc) if image_request else str(exc)
             ), account_email=getattr(exc, "account_email", ""),
-                     extra=_exception_log_fields(exc, image=image_request))
+                                 extra=_exception_log_fields(exc, image=image_request))
             if image_request:
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
@@ -648,7 +698,7 @@ class LoggedCall:
             projected_extra: dict[str, object] = {}
             if projected_status != "success" and result.get("error_code"):
                 projected_extra["error_code"] = result["error_code"]
-            self.log(
+            await self.log_async(
                 "调用失败" if projected_status == "failed" else "调用完成",
                 result,
                 status=projected_status,
@@ -699,28 +749,35 @@ class LoggedCall:
         try:
             has_first, first = await (_run_image_sync(_next_item_with_timing) if image_request else run_in_threadpool(_next_item_with_timing))
         except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=_public_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""),
-                     extra=_exception_log_fields(exc, image=image_request))
+            await self.log_async("调用失败", status="failed", error=_public_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
+                                 conversation_id=getattr(exc, "conversation_id", ""),
+                                 extra=_exception_log_fields(exc, image=image_request))
             return _image_error_response(exc)
         except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
+            await self.log_async("调用失败", status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
-            self.log("调用失败", status="failed", error=(
+            await self.log_async("调用失败", status="failed", error=(
                 _public_image_exception_message(exc) if image_request else str(exc)
             ), account_email=getattr(exc, "account_email", ""),
-                     extra=_exception_log_fields(exc, image=image_request))
+                                 extra=_exception_log_fields(exc, image=image_request))
             if image_request:
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
         if not has_first:
-            self.log("流式调用结束")
+            await self.log_async("流式调用结束")
             return StreamingResponse(sender(()), media_type="text/event-stream")
         items = self.stream(itertools.chain([first], result))
-        if image_request:
-            return StreamingResponse(_image_stream_async(items, sender, result), media_type="text/event-stream")
-        return StreamingResponse(sender(items), media_type="text/event-stream")
+        return StreamingResponse(
+            _stream_async(
+                items,
+                sender,
+                result,
+                runner=_run_image_sync if image_request else _run_default_sync,
+                on_closed=lambda: self.log_unstarted_stream(first),
+            ),
+            media_type="text/event-stream",
+        )
 
     def _is_image_request(self) -> bool:
         if self.image_request or self.endpoint.startswith("/v1/images"):
@@ -763,6 +820,22 @@ class LoggedCall:
                 conversation_ids.extend(_collect_conversation_ids(item))
                 image_attempts = collect_image_attempts([image_attempts, item])
                 yield _strip_internal_response_fields(item)
+        except GeneratorExit:
+            failed = True
+            extra = dict(result_metrics)
+            extra["error_code"] = CLIENT_DISCONNECTED_CODE
+            if image_attempts:
+                extra["image_attempts"] = image_attempts
+            self.log(
+                "流式调用中断",
+                status="failed",
+                error=CLIENT_DISCONNECTED_MESSAGE,
+                urls=urls,
+                account_email=account_emails[0] if account_emails else "",
+                conversation_id=conversation_ids[0] if conversation_ids else "",
+                extra=extra,
+            )
+            raise
         except Exception as exc:
             failed = True
             extra = _exception_log_fields(exc, image=image_request)
@@ -803,6 +876,32 @@ class LoggedCall:
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
             extra: dict[str, object] | None = None) -> None:
+        """Write the Call Record; a storage failure never changes the API outcome."""
+        self.logged = True
+        try:
+            self._write_log(suffix, result, status, error, urls, account_email, conversation_id, extra)
+        except Exception as exc:
+            logger.error({
+                "event": "call_record_write_failed",
+                "call_id": self.call_id,
+                "endpoint": self.endpoint,
+                "error_type": exc.__class__.__name__,
+            })
+            if self._trace_image_perf():
+                # The live monitor entry must end even when the record could not be built.
+                try:
+                    realtime_monitor_service.finish({
+                        "call_id": self.call_id,
+                        "endpoint": self.endpoint,
+                        "model": self.model,
+                        "status": status,
+                    })
+                except Exception:
+                    pass
+
+    def _write_log(self, suffix: str, result: object, status: str, error: str,
+                   urls: list[str] | None, account_email: str, conversation_id: str,
+                   extra: dict[str, object] | None) -> None:
         failure_code = (extra or {}).get("error_code") or (extra or {}).get("failure_code")
         if is_text_review_failure_code(failure_code):
             status = "text_review"

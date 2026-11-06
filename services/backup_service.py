@@ -6,6 +6,7 @@ import io
 import json
 import os
 import random
+import shutil
 import sqlite3
 import subprocess
 import tarfile
@@ -14,6 +15,7 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlencode
+from xml.sax.saxutils import escape as xml_escape
 
 from curl_cffi import requests
 from sqlalchemy import make_url
@@ -64,24 +66,43 @@ def _hmac_sha256(key: bytes, message: str) -> bytes:
     return hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()
 
 
-def _openssl_encrypt(data: bytes, passphrase: str) -> bytes:
+BACKUP_WORK_DIR_PREFIX = ".backup-work-"
+BACKUP_PBKDF2_ITERATIONS = 600_000
+BACKUP_HMAC_KEY_CONTEXT = b"chatgpt2api-backup-hmac-v1"
+BACKUP_MULTIPART_THRESHOLD_BYTES = 64 * 1024 * 1024
+BACKUP_MULTIPART_PART_BYTES = 32 * 1024 * 1024
+BACKUP_MIN_UPLOAD_TIMEOUT_SECS = 60.0
+BACKUP_MIN_UPLOAD_BYTES_PER_SEC = 256 * 1024
+BACKUP_FILE_CHUNK_BYTES = 1024 * 1024
+
+
+def _upload_timeout(size: int) -> float:
+    return max(BACKUP_MIN_UPLOAD_TIMEOUT_SECS, size / BACKUP_MIN_UPLOAD_BYTES_PER_SEC + 30.0)
+
+
+def _openssl_encrypt_file(source: Path, target: Path, passphrase: str) -> None:
     env = dict(os.environ)
     env["CHATGPT2API_BACKUP_PASSPHRASE"] = passphrase
     try:
-        result = subprocess.run(
+        subprocess.run(
             [
                 "openssl",
                 "enc",
                 "-aes-256-cbc",
                 "-pbkdf2",
+                "-iter",
+                str(BACKUP_PBKDF2_ITERATIONS),
                 "-salt",
                 "-md",
                 "sha256",
+                "-in",
+                str(source),
+                "-out",
+                str(target),
                 "-pass",
                 "env:CHATGPT2API_BACKUP_PASSPHRASE",
             ],
-            input=data,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             check=True,
             env=env,
@@ -91,7 +112,31 @@ def _openssl_encrypt(data: bytes, passphrase: str) -> bytes:
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
         raise BackupError(f"加密备份失败：{detail or 'openssl 执行失败'}") from exc
-    return result.stdout
+
+
+def _ciphertext_hmac(path: Path, passphrase: str) -> str:
+    """HMAC-SHA256 over an openssl `Salted__` file, keyed from the passphrase and its salt."""
+    with path.open("rb") as source:
+        header = source.read(16)
+        if len(header) != 16 or not header.startswith(b"Salted__"):
+            raise BackupError("加密备份失败：openssl 输出缺少盐值")
+        key = hashlib.pbkdf2_hmac(
+            "sha256",
+            passphrase.encode("utf-8"),
+            BACKUP_HMAC_KEY_CONTEXT + header[8:],
+            BACKUP_PBKDF2_ITERATIONS,
+        )
+        digest = hmac.new(key, header, hashlib.sha256)
+        while chunk := source.read(BACKUP_FILE_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _xml_text(document: str, tag: str) -> str:
+    opening = f"<{tag}>"
+    if opening not in document:
+        return ""
+    return _clean(document.split(opening, 1)[1].split(f"</{tag}>", 1)[0])
 
 
 def _json_bytes(value: object) -> bytes:
@@ -211,15 +256,67 @@ class CloudflareR2Client:
             raise BackupError(f"连接 R2 失败：HTTP {response.status_code}")
         return {"ok": True, "status": int(response.status_code)}
 
-    def upload_bytes(self, key: str, payload: bytes, *, content_type: str, metadata: dict[str, str] | None = None) -> dict[str, object]:
+    def upload_file(self, key: str, path: Path, *, content_type: str, metadata: dict[str, str] | None = None) -> dict[str, object]:
         headers = {"content-type": content_type}
         if metadata:
             for item_key, item_value in metadata.items():
                 headers[f"x-amz-meta-{item_key}"] = str(item_value)
-        response = self._request("PUT", key, body=payload, extra_headers=headers)
+        size = path.stat().st_size
+        if size > BACKUP_MULTIPART_THRESHOLD_BYTES:
+            return self._upload_multipart(key, path, headers=headers)
+        response = self._request(
+            "PUT",
+            key,
+            body=path.read_bytes(),
+            extra_headers=headers,
+            timeout=_upload_timeout(size),
+        )
         if response.status_code >= 400:
             raise BackupError(f"上传备份失败：HTTP {response.status_code}")
         return {"key": key, "etag": str(response.headers.get("etag") or "").strip('"')}
+
+    def _upload_multipart(self, key: str, path: Path, *, headers: dict[str, str]) -> dict[str, object]:
+        response = self._request("POST", key, query={"uploads": ""}, extra_headers=headers, timeout=60.0)
+        upload_id = _xml_text(response.text, "UploadId") if response.status_code < 400 else ""
+        if not upload_id:
+            raise BackupError(f"上传备份失败：无法创建分片上传（HTTP {response.status_code}）")
+        try:
+            parts: list[tuple[int, str]] = []
+            with path.open("rb") as source:
+                while chunk := source.read(BACKUP_MULTIPART_PART_BYTES):
+                    part_number = len(parts) + 1
+                    part = self._request(
+                        "PUT",
+                        key,
+                        query={"partNumber": str(part_number), "uploadId": upload_id},
+                        body=chunk,
+                        timeout=_upload_timeout(len(chunk)),
+                    )
+                    etag = _clean(part.headers.get("etag"))
+                    if part.status_code >= 400 or not etag:
+                        raise BackupError(f"上传备份分片 {part_number} 失败：HTTP {part.status_code}")
+                    parts.append((part_number, etag))
+            body = "".join(
+                f"<Part><PartNumber>{number}</PartNumber><ETag>{xml_escape(etag)}</ETag></Part>"
+                for number, etag in parts
+            )
+            complete = self._request(
+                "POST",
+                key,
+                query={"uploadId": upload_id},
+                body=f"<CompleteMultipartUpload>{body}</CompleteMultipartUpload>".encode("utf-8"),
+                extra_headers={"content-type": "application/xml"},
+                timeout=120.0,
+            )
+            if complete.status_code >= 400 or "<Error>" in complete.text:
+                raise BackupError(f"上传备份失败：无法完成分片上传（HTTP {complete.status_code}）")
+            return {"key": key, "etag": _xml_text(complete.text, "ETag").strip('"')}
+        except Exception:
+            try:
+                self._request("DELETE", key, query={"uploadId": upload_id}, timeout=30.0)
+            except Exception:
+                pass
+            raise
 
     def delete_object(self, key: str) -> None:
         response = self._request("DELETE", key, timeout=30.0)
@@ -282,6 +379,9 @@ class BackupService:
     def _recover_interrupted_execution(self) -> None:
         try:
             with self._repository.run_lock(timeout_seconds=0):
+                # Holding the lease means no backup is writing a work directory now.
+                for leftover in DATA_DIR.glob(f"{BACKUP_WORK_DIR_PREFIX}*"):
+                    shutil.rmtree(leftover, ignore_errors=True)
                 state = _normalize_backup_state(self._repository.load())
                 if state["last_status"] != "running":
                     return
@@ -314,10 +414,17 @@ class BackupService:
     def _run(self) -> None:
         while not self._stop_event.is_set():
             try:
+                self._recover_stale_running_state()
                 self.run_scheduled_backup_if_needed()
             except Exception:
                 pass
             self._stop_event.wait(30)
+
+    def _recover_stale_running_state(self) -> None:
+        if self._running:
+            return
+        if _normalize_backup_state(self._repository.load())["last_status"] == "running":
+            self._recover_interrupted_execution()
 
     def run_scheduled_backup_if_needed(self) -> None:
         settings = config.get_backup_settings()
@@ -454,32 +561,45 @@ class BackupService:
     def _run_backup_once(self, *, trigger: str) -> dict[str, object]:
         settings = config.get_backup_settings()
         client = CloudflareR2Client(settings)
-        client.validate()
-        payload_raw = self._build_backup_archive(settings, trigger=trigger)
-        encrypted = bool(settings.get("encrypt"))
-        if encrypted:
-            passphrase = _clean(settings.get("passphrase"))
-            if not passphrase:
-                raise BackupError("已启用备份加密，但未设置加密口令")
-            payload = _openssl_encrypt(payload_raw, passphrase)
-            suffix = ".tar.gz.enc"
-        else:
-            payload = payload_raw
-            suffix = ".tar.gz"
-        timestamp = _utc_now().strftime("%Y%m%dT%H%M%SZ")
-        random_tag = f"{random.randint(0, 0xFFFF):04x}"
-        object_key = f"{client.prefix.rstrip('/')}/backup-{timestamp}-{random_tag}{suffix}"
-        metadata = {
-            "created-at": _iso_now(),
-            "encrypted": "true" if encrypted else "false",
-            "trigger": trigger,
-        }
         try:
-            result = client.upload_bytes(object_key, payload, content_type="application/octet-stream", metadata=metadata)
+            client.validate()
+            encrypted = bool(settings.get("encrypt"))
+            passphrase = _clean(settings.get("passphrase"))
+            if encrypted and not passphrase:
+                raise BackupError("已启用备份加密，但未设置加密口令")
+            # On the data volume: archives can be large and the system temp dir small.
+            with tempfile.TemporaryDirectory(prefix=BACKUP_WORK_DIR_PREFIX, dir=DATA_DIR) as workspace:
+                archive_path = Path(workspace) / "backup.tar.gz"
+                self._build_backup_archive(settings, trigger=trigger, destination=archive_path)
+                metadata = {
+                    "created-at": _iso_now(),
+                    "encrypted": "true" if encrypted else "false",
+                    "trigger": trigger,
+                }
+                if encrypted:
+                    payload_path = Path(workspace) / "backup.tar.gz.enc"
+                    _openssl_encrypt_file(archive_path, payload_path, passphrase)
+                    archive_path.unlink(missing_ok=True)
+                    metadata["kdf"] = f"pbkdf2-sha256-{BACKUP_PBKDF2_ITERATIONS}"
+                    metadata["ciphertext-hmac-sha256"] = _ciphertext_hmac(payload_path, passphrase)
+                    suffix = ".tar.gz.enc"
+                else:
+                    payload_path = archive_path
+                    suffix = ".tar.gz"
+                timestamp = _utc_now().strftime("%Y%m%dT%H%M%SZ")
+                random_tag = f"{random.randint(0, 0xFFFF):04x}"
+                object_key = f"{client.prefix.rstrip('/')}/backup-{timestamp}-{random_tag}{suffix}"
+                size = payload_path.stat().st_size
+                result = client.upload_file(
+                    object_key,
+                    payload_path,
+                    content_type="application/octet-stream",
+                    metadata=metadata,
+                )
             self._apply_rotation(client, int(settings.get("rotation_keep") or 0))
             return {
                 "key": result["key"],
-                "size": len(payload),
+                "size": size,
                 "encrypted": encrypted,
             }
         finally:
@@ -496,7 +616,7 @@ class BackupService:
             if key:
                 client.delete_object(key)
 
-    def _build_backup_archive(self, settings: dict[str, object], *, trigger: str) -> bytes:
+    def _build_backup_archive(self, settings: dict[str, object], *, trigger: str, destination: Path) -> None:
         include = settings.get("include") if isinstance(settings.get("include"), dict) else {}
         database_backend = database_backend_name(self._repository.database_url)
         metadata = {
@@ -507,19 +627,19 @@ class BackupService:
             "database_backend": database_backend,
             "application_database": config.get_storage_backend().get_backend_info(),
         }
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        with tarfile.open(destination, mode="w:gz") as archive:
             self._add_bytes_to_archive(archive, "backup-metadata.json", _json_bytes(metadata))
             database_name = (
                 "data/application-database.sqlite3"
                 if database_backend == "sqlite"
                 else "data/application-database.pgdump"
             )
-            self._add_bytes_to_archive(
-                archive,
-                database_name,
-                self._application_database_backup(database_backend),
-            )
+            database_snapshot = destination.with_name("application-database.snapshot")
+            try:
+                self._application_database_backup(database_backend, database_snapshot)
+                archive.add(database_snapshot, arcname=database_name)
+            finally:
+                database_snapshot.unlink(missing_ok=True)
             if include.get("image_tasks"):
                 self._add_file_to_archive(archive, DATA_DIR / "image_tasks.json", "data/image_tasks.json")
                 self._add_file_to_archive(archive, IMAGE_INDEX_FILE, "data/image_index.json")
@@ -528,37 +648,30 @@ class BackupService:
             if include.get("images"):
                 self._add_file_to_archive(archive, TAGS_FILE, "data/image_tags.json")
                 self._add_directory_to_archive(archive, config.images_dir, "data/images")
-        return buffer.getvalue()
 
-    def _application_database_backup(self, backend: str) -> bytes:
+    def _application_database_backup(self, backend: str, destination: Path) -> None:
         if backend == "sqlite":
-            return self._sqlite_database_backup()
+            return self._sqlite_database_backup(destination)
         if backend == "postgresql":
-            return self._postgresql_database_backup()
+            return self._postgresql_database_backup(destination)
         raise BackupError(f"不支持备份数据库类型：{backend}")
 
-    def _sqlite_database_backup(self) -> bytes:
-        temporary_path = ""
+    def _sqlite_database_backup(self, destination_path: Path) -> None:
         raw_connection = self._repository.engine.raw_connection()
         try:
-            with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as temporary:
-                temporary_path = temporary.name
-            destination = sqlite3.connect(temporary_path)
+            destination = sqlite3.connect(str(destination_path))
             try:
                 raw_connection.driver_connection.backup(destination)
             finally:
                 destination.close()
-            return Path(temporary_path).read_bytes()
         except Exception as exc:
             raise BackupError("创建 SQLite Application Database 快照失败") from exc
         finally:
             raw_connection.close()
-            if temporary_path:
-                Path(temporary_path).unlink(missing_ok=True)
 
-    def _postgresql_database_backup(self) -> bytes:
+    def _postgresql_database_backup(self, destination: Path) -> None:
         url = make_url(self._repository.database_url)
-        command = ["pg_dump", "--format=custom", "--no-owner", "--no-privileges"]
+        command = ["pg_dump", "--format=custom", "--no-owner", "--no-privileges", "--file", str(destination)]
         if url.host:
             command.extend(["--host", url.host])
         if url.port:
@@ -575,9 +688,9 @@ class BackupService:
         if sslmode:
             env["PGSSLMODE"] = sslmode
         try:
-            result = subprocess.run(
+            subprocess.run(
                 command,
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 check=True,
                 env=env,
@@ -587,9 +700,8 @@ class BackupService:
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
             raise BackupError(f"PostgreSQL 备份失败：{detail or 'pg_dump 执行失败'}") from exc
-        if not result.stdout:
+        if not destination.is_file() or destination.stat().st_size == 0:
             raise BackupError("PostgreSQL 备份失败：pg_dump 未输出数据")
-        return result.stdout
 
     def _add_bytes_to_archive(self, archive: tarfile.TarFile, name: str, payload: bytes) -> None:
         info = tarfile.TarInfo(name=name)

@@ -55,7 +55,7 @@
             :placeholder="placeholderText"
             @input="resizeTextarea"
             @paste="handlePaste"
-            @keydown.enter.exact.prevent="$emit('submit')"
+            @keydown.enter.exact="handleEnterKey"
           ></textarea>
         </div>
 
@@ -616,6 +616,13 @@ function handlePaste(event: ClipboardEvent) {
   if (!files.length) return
   event.preventDefault()
   emit('add-files', files)
+}
+
+function handleEnterKey(event: KeyboardEvent) {
+  // Enter that confirms an IME candidate must not send a half-typed prompt.
+  if (event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  emit('submit')
 }
 
 function handleDragEnter() {

@@ -39,7 +39,8 @@ class ImageFailure:
 
     @property
     def switch_account(self) -> bool:
-        return self.outcome == "failure"
+        # Local faults (storage, format conversion) recur on every account.
+        return self.outcome == "failure" and self.scope != "local"
 
     @property
     def account_failure(self) -> bool:
@@ -136,6 +137,9 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
     ),
     "image_download_failed": FailurePolicy(
         "delivery", None, False, 502, "server_error",
+    ),
+    "image_storage_failed": FailurePolicy(
+        "local", None, False, 500, "server_error",
     ),
     "task_interrupted": FailurePolicy(
         "request", None, False, 503, "server_error",
@@ -375,6 +379,10 @@ class ImagePollTimeoutError(ImageFailureError):
 
 class ImageDownloadError(ImageFailureError):
     failure_code = "image_download_failed"
+
+
+class ImageStorageFailedError(ImageFailureError):
+    failure_code = "image_storage_failed"
 
 
 class ImageGenerationError(ImageFailureError):

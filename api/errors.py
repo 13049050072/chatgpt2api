@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -7,6 +9,9 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from services.protocol.error_response import anthropic_error_response, openai_error_response
+
+# Slows key guessing without locking out clients that share an address.
+FAILED_AUTH_DELAY_SECONDS = 0.5
 
 
 def _is_openai_compatible_path(path: str) -> bool:
@@ -31,6 +36,8 @@ def _compatible_error_response(
 def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        if exc.status_code == 401:
+            await asyncio.sleep(FAILED_AUTH_DELAY_SECONDS)
         if _is_openai_compatible_path(request.url.path):
             return _compatible_error_response(request, exc.detail, exc.status_code, exc.headers)
         return JSONResponse(

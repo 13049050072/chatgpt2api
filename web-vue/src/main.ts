@@ -3,7 +3,7 @@ import { createPinia } from 'pinia'
 import { nanocatZhCN, setNanocatLocale } from 'nanocat-ui'
 import 'nanocat-ui/styles.css'
 import router from './router'
-import { setUnauthorizedHandler } from './api/client'
+import { AUTH_TOKEN_STORAGE_KEY, setUnauthorizedHandler } from './api/client'
 import { useAuthStore } from './stores/auth'
 import { registerLocalIcons } from './lib/icons'
 import { applyThemeMode, getStoredThemeMode } from './lib/theme'
@@ -28,6 +28,11 @@ setUnauthorizedHandler(() => {
     name: 'login',
     query: redirect && redirect !== '/login' ? { redirect } : undefined,
   }).catch(() => {})
+})
+
+// Another tab signed in, out or switched keys: drop this tab's state for the old key.
+window.addEventListener('storage', (event) => {
+  if (event.key === null || event.key === AUTH_TOKEN_STORAGE_KEY) window.location.reload()
 })
 
 app.use(router)

@@ -2,13 +2,12 @@ import base64
 import json
 import mimetypes
 import os
+import queue
 import random
 import re
 import threading
 import time
 
-import urllib.error
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
@@ -19,6 +18,7 @@ from urllib.parse import unquote, urlparse
 from uuid import NAMESPACE_URL, uuid5
 
 from curl_cffi import CurlInfo, CurlOpt, requests
+from curl_cffi.requests.models import STREAM_END
 from PIL import Image
 
 from services.account_service import account_service
@@ -44,7 +44,14 @@ from services.image_failure import (
 from services.protocol.reasoning import normalize_thinking_effort
 from services.proxy_service import ProxyRuntimeProfile, proxy_settings
 from utils.file_names import sanitize_public_filename
-from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
+from utils.helper import (
+    UpstreamHTTPError,
+    close_response_in_background,
+    ensure_ok,
+    iter_sse_payloads,
+    new_uuid,
+    split_image_model,
+)
 from utils.diagnostics import diagnostic_excerpt
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
@@ -193,6 +200,78 @@ class EditableFileExportResult:
     conversation_id: str
     primary_path: Path
     zip_path: Path
+
+
+class _CurlStreamReader:
+    """Line reader over a streamed curl_cffi response for the Codex event parser.
+
+    close() may be called from a watchdog thread; reads then return EOF
+    promptly instead of waiting for the next upstream chunk.
+    """
+
+    _POLL_SECONDS = 0.5
+
+    def __init__(self, response: Any) -> None:
+        self._response = response
+        self._queue = getattr(response, "queue", None)
+        self._chunks = None if self._queue is not None else response.iter_content()
+        self._buffer = bytearray()
+        self._scan_from = 0
+        self._closed = threading.Event()
+        self._ended = False
+        self.headers = response.headers
+        self.status = response.status_code
+
+    def _next_chunk(self) -> bytes | None:
+        if self._ended:
+            return None
+        if self._queue is None:
+            chunk = next(self._chunks, None)
+            if chunk is None:
+                self._ended = True
+            return chunk
+        while not self._closed.is_set():
+            try:
+                chunk = self._queue.get(timeout=self._POLL_SECONDS)
+            except queue.Empty:
+                continue
+            if chunk is STREAM_END:
+                self._ended = True
+                return None
+            if isinstance(chunk, BaseException):
+                self._ended = True
+                raise chunk
+            return chunk
+        return None
+
+    def readline(self) -> bytes:
+        while True:
+            newline = self._buffer.find(b"\n", self._scan_from)
+            if newline >= 0:
+                line = bytes(self._buffer[: newline + 1])
+                del self._buffer[: newline + 1]
+                self._scan_from = 0
+                return line
+            self._scan_from = len(self._buffer)
+            chunk = self._next_chunk()
+            if chunk is None:
+                line = bytes(self._buffer)
+                self._buffer.clear()
+                self._scan_from = 0
+                return line
+            self._buffer.extend(chunk)
+
+    def read(self) -> bytes:
+        while (chunk := self._next_chunk()) is not None:
+            self._buffer.extend(chunk)
+        data = bytes(self._buffer)
+        self._buffer.clear()
+        self._scan_from = 0
+        return data
+
+    def close(self) -> None:
+        self._closed.set()
+        close_response_in_background(self._response)
 
 
 class OpenAIBackendAPI:
@@ -1014,7 +1093,7 @@ class OpenAIBackendAPI:
                     }:
                         break
         finally:
-            response.close()
+            close_response_in_background(response)
 
     def stream_codex_text(
             self,
@@ -1318,12 +1397,6 @@ class OpenAIBackendAPI:
             "tool_choice": {"type": "image_generation"},
             "stream": True,
         }
-        request = urllib.request.Request(
-            self.base_url + path,
-            json.dumps(payload).encode(),
-            self._codex_responses_headers(),
-            method="POST",
-        )
         account = account_service.get_account(self.access_token) or {}
         token_payload = account_service._decode_jwt_payload(self.access_token)
         auth_claim = token_payload.get("https://api.openai.com/auth")
@@ -1332,7 +1405,7 @@ class OpenAIBackendAPI:
         logger.info({
             "event": "codex_responses_request_debug",
             "url": self.base_url + path,
-            "transport": "urllib.request",
+            "transport": "curl_cffi.session",
             "timeout_secs": config.image_stream_timeout_secs,
             "account_email": str(account.get("email") or "").strip(),
             "source_type": str(account.get("source_type") or "").strip(),
@@ -1366,20 +1439,27 @@ class OpenAIBackendAPI:
             },
         })
         stream_timeout = config.image_stream_timeout_secs
+        # Use the account session so Codex images keep the account's proxy
+        # egress and browser TLS fingerprint like every other upstream call.
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._codex_responses_headers(),
+            json=payload,
+            timeout=stream_timeout + 30,
+            stream=True,
+        )
         try:
-            with urllib.request.urlopen(request, timeout=stream_timeout) as raw:
-                yield from self._iter_codex_response_events(raw, max_duration_secs=stream_timeout)
-        except urllib.error.HTTPError as error:
-            body_text = error.read().decode("utf-8", "replace")
-            body: Any = body_text
             try:
-                body = json.loads(body_text)
-            except Exception:
-                pass
-            self._log_codex_response_failure(path, error.code, error.headers, payload, body)
-            retry_after_header = error.headers.get("Retry-After") if error.headers else None
-            retry_after = int(retry_after_header) if str(retry_after_header or "").isdigit() else None
-            raise UpstreamHTTPError(path, error.code, body, retry_after=retry_after) from error
+                ensure_ok(response, path)
+            except UpstreamHTTPError as error:
+                self._log_codex_response_failure(path, error.status_code, response.headers, payload, error.body)
+                raise
+            yield from self._iter_codex_response_events(
+                _CurlStreamReader(response),
+                max_duration_secs=stream_timeout,
+            )
+        finally:
+            close_response_in_background(response)
 
     def _prepare_image_conversation(self, prompt: str, requirements: ChatRequirements, model: str) -> str:
         """为图片生成准备 conduit token。"""
@@ -2041,7 +2121,7 @@ class OpenAIBackendAPI:
         try:
             ensure_ok(response, path)
         except UpstreamHTTPError as exc:
-            response.close()
+            close_response_in_background(response)
             self._raise_editable_http_failure(exc, "editable_stream_http_failure")
         conversation_id = ""
         try:
@@ -2058,7 +2138,7 @@ class OpenAIBackendAPI:
                     self._raise_editable_failure(failure, "editable_stream_failure")
                 conversation_id = conversation_id or self._find_editable_value(payload, "conversation_id")
         finally:
-            response.close()
+            close_response_in_background(response)
         if not conversation_id:
             raise RuntimeError("conversation_id not found in stream")
         return conversation_id
@@ -2679,7 +2759,7 @@ class OpenAIBackendAPI:
                 if payload == "[DONE]":
                     break
         finally:
-            response.close()
+            close_response_in_background(response)
         if not conversation_id:
             raise RuntimeError("conversation_id not found in stream")
         return conversation_id
@@ -3267,7 +3347,10 @@ class OpenAIBackendAPI:
             conversation_query_started = time.perf_counter()
             try:
                 try:
-                    conversation = self._get_conversation(conversation_id)
+                    conversation = self._get_conversation(
+                        conversation_id,
+                        timeout_secs=max(1.0, min(60.0, _remaining())),
+                    )
                 finally:
                     self._add_image_result_timing(
                         "poll_request_ms",
@@ -3824,7 +3907,7 @@ class OpenAIBackendAPI:
         try:
             yield from iter_sse_payloads(response)
         finally:
-            response.close()
+            close_response_in_background(response)
 
     def _report_progress(self, step: str) -> None:
         """Report progress step to the callback if set."""
@@ -3867,7 +3950,9 @@ class OpenAIBackendAPI:
                     })
                     break
         finally:
-            response.close()
+            # Upstream may keep the connection open after the terminal event;
+            # a blocking close would delay result polling until the transport timeout.
+            close_response_in_background(response)
 
     def _bootstrap(self, timeout_secs: float = 30.0) -> None:
         """预热首页，并提取 PoW 相关脚本引用。"""

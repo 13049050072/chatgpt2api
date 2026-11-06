@@ -51,7 +51,11 @@ backend business meaning from raw fields or error text.
 | Editable File Assets | Published and staging filesystem directories | `EditableFileTaskService` |
 | Active Requests and live operation counters | Process memory | `RealtimeMonitorService` |
 | Online-update task progress | `data/update_task.json` | `UpdateService` |
-| Studio conversation presentation state | Browser-local storage | Studio conversation runtimes |
+| Studio conversation presentation state | Browser-local storage, kept separately per signed-in key | Studio conversation runtimes |
+
+Paths under `data/` resolve against the data directory. `CHATGPT2API_DATA_DIR`
+relocates it, and the default SQLite Application Database (used when
+`DATABASE_URL` is unset) moves with it.
 
 One physical Application Database does not create one generic repository or one
 transaction boundary. Image Assets, Image Tasks, gallery files, and live

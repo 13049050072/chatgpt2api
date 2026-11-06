@@ -44,12 +44,38 @@ class CacheEntry:
     value: Any
 
 
+FOLLOWER_WAIT_TIMEOUT_SECONDS = 600.0
+
+
 @dataclass
 class InflightCall:
     condition: threading.Condition = field(default_factory=lambda: threading.Condition(threading.RLock()))
     done: bool = False
+    cancelled: bool = False
     value: Any = None
     error: BaseException | None = None
+
+    def wait_for_result(self) -> bool:
+        """Wait for the owner; False means the caller must compute on its own."""
+        deadline = time.monotonic() + FOLLOWER_WAIT_TIMEOUT_SECONDS
+        with self.condition:
+            while not self.done:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self.condition.wait(remaining)
+            return not self.cancelled
+
+    def finish(self, *, value: Any = None, error: BaseException | None = None) -> None:
+        with self.condition:
+            if isinstance(error, GeneratorExit):
+                # The owner's client went away; waiting callers are still valid.
+                self.cancelled = True
+            else:
+                self.error = error
+                self.value = value
+            self.done = True
+            self.condition.notify_all()
 
 
 def _json_safe(value: Any) -> Any:
@@ -167,20 +193,23 @@ class ChatCompletionCache:
                 owner = False
 
         if not owner:
-            with inflight.condition:
-                while not inflight.done:
-                    inflight.condition.wait()
-                if inflight.error:
-                    raise inflight.error
-                return self._copy(inflight.value)
+            if not inflight.wait_for_result():
+                return compute()
+            if inflight.error:
+                raise inflight.error
+            return self._copy(inflight.value)
 
         try:
             value = compute()
         except BaseException as exc:
             with self._lock:
-                self._inflight.pop(key, None)
+                if self._inflight.get(key) is inflight:
+                    self._inflight.pop(key, None)
             with inflight.condition:
-                inflight.error = exc if not isinstance(exc, GeneratorExit) else RuntimeError("response cancelled")
+                if isinstance(exc, Exception):
+                    inflight.error = exc
+                else:
+                    inflight.cancelled = True
                 inflight.done = True
                 inflight.condition.notify_all()
             raise
@@ -229,13 +258,15 @@ class ChatCompletionCache:
             return
 
         if not owner:
-            with inflight.condition:
-                while not inflight.done:
-                    inflight.condition.wait()
-                if inflight.error:
-                    raise inflight.error
-                yield from self._copy(inflight.value)
+            if not inflight.wait_for_result():
+                # The leader's client went away or it is too slow; this caller
+                # still deserves its own answer.
+                yield from compute()
                 return
+            if inflight.error:
+                raise inflight.error
+            yield from self._copy(inflight.value)
+            return
 
         chunks: list[dict[str, Any]] = []
         try:
@@ -244,9 +275,13 @@ class ChatCompletionCache:
                 yield chunk
         except BaseException as exc:
             with self._lock:
-                self._inflight.pop(key, None)
+                if self._inflight.get(key) is inflight:
+                    self._inflight.pop(key, None)
             with inflight.condition:
-                inflight.error = exc if not isinstance(exc, GeneratorExit) else RuntimeError("stream cancelled")
+                if isinstance(exc, Exception):
+                    inflight.error = exc
+                else:
+                    inflight.cancelled = True
                 inflight.done = True
                 inflight.condition.notify_all()
             raise

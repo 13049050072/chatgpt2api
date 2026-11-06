@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import itertools
 import json
 import re
 import time
@@ -166,21 +167,43 @@ def message_response(model: str, text: str, input_tokens: int, output_tokens: in
 
 def content_blocks(text: str, tools: object = None) -> tuple[list[dict[str, object]], str]:
     calls = parse_tool_calls(text) if isinstance(tools, list) and tools else []
-    text = strip_tool_markup(text)
     if calls:
+        text = strip_tool_markup(text)
         content = ([{"type": "text", "text": text}] if text else []) + [{"type": "tool_use", "id": f"toolu_{uuid.uuid4()}", "name": name, "input": args} for name, args in calls]
         return content, "tool_use"
-    return [{"type": "text", "text": text}], "end_turn"
+    # Without a parsed call, tool-like markup is part of the answer (e.g. an example).
+    return [{"type": "text", "text": (text or "").strip()}], "end_turn"
 
 
 def strip_tool_markup(text: str) -> str:
     return re.sub(r"(?is)<tool_calls\b[^>]*>.*?</tool_calls>|<tool_call\b[^>]*>.*?</tool_call>|<function_call\b[^>]*>.*?</function_call>|<invoke\b[^>]*>.*?</invoke>", "", text or "").strip()
 
 
+_TOOL_TAG_RE = re.compile(r"(?is)<tool_calls\b|<tool_call\b|<function_call\b|<invoke\b")
+_TOOL_TAG_PREFIXES = ("<tool_calls", "<tool_call", "<function_call", "<invoke")
+
+
 def streamable_text(text: str) -> str:
+    """Return the part of tool-mode text that cannot become tool markup."""
     text = text or ""
-    match = re.search(r"(?is)<tool_calls\b|<tool_call\b|<function_call\b|<invoke\b", text)
-    return text[:match.start()].rstrip() if match else text
+    match = _TOOL_TAG_RE.search(text)
+    if match:
+        return text[:match.start()].rstrip()
+    fragment_start = text.rfind("<")
+    if fragment_start >= 0:
+        fragment = text[fragment_start:].lower()
+        if any(prefix.startswith(fragment) for prefix in _TOOL_TAG_PREFIXES):
+            return text[:fragment_start].rstrip()
+    return text
+
+
+def _unsent_text(final_text: str, streamed_text: str) -> str:
+    if final_text.startswith(streamed_text):
+        return final_text[len(streamed_text):]
+    stripped = streamed_text.strip()
+    if final_text.startswith(stripped):
+        return final_text[len(stripped):]
+    return ""
 
 
 def _with_log_metadata(payload: dict[str, object], account_email: str = "") -> dict[str, object]:
@@ -236,11 +259,15 @@ def stream_events(chunks: Iterable[dict[str, object]], model: str, input_tokens:
     tool_mode = isinstance(tools, list) and bool(tools)
     tool_started = False
     text_open = False
+    remaining_chunks = iter(chunks)
+    # Pull the first upstream chunk before message_start so failures before
+    # any output become an HTTP error instead of an error event in a 200 stream.
+    first_chunk = next(remaining_chunks, None)
     yield {"type": "message_start", "message": {"id": message_id, "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": input_tokens, "output_tokens": 0}}}
     if not tool_mode:
         text_open = True
         yield {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
-    for chunk in chunks:
+    for chunk in itertools.chain([first_chunk] if first_chunk is not None else [], remaining_chunks):
         chunk_account_email = str(chunk.get("_account_email") or "").strip()
         if chunk_account_email:
             account_email = chunk_account_email
@@ -262,27 +289,24 @@ def stream_events(chunks: Iterable[dict[str, object]], model: str, input_tokens:
                             {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text_delta}},
                             account_email,
                         )
-                tool_started = tool_mode and visible_text != current_text
+                tool_started = tool_mode and _TOOL_TAG_RE.search(current_text) is not None
         if choice.get("finish_reason"):
             content, stop_reason = content_blocks(current_text, tools)
+            final_text = str(content[0].get("text") or "") if content and content[0]["type"] == "text" else ""
+            remaining = _unsent_text(final_text, streamed_text) if tool_mode else ""
+            if remaining:
+                if not text_open:
+                    text_open = True
+                    yield {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
+                yield _with_log_metadata(
+                    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": remaining}},
+                    account_email,
+                )
             if text_open:
                 yield {"type": "content_block_stop", "index": 0}
             if stop_reason == "tool_use":
-                start_index = 1 if text_open else 0
-                if content and content[0]["type"] == "text":
-                    remaining = str(content[0].get("text") or "")[len(streamed_text):]
-                    if remaining:
-                        if not text_open:
-                            yield {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}
-                        yield _with_log_metadata(
-                            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": remaining}},
-                            account_email,
-                        )
-                        if not text_open:
-                            yield {"type": "content_block_stop", "index": 0}
-                    start_index = 1
-                    content = content[1:]
-                yield from _stream_buffered_blocks(content, start_index)
+                tool_blocks = [block for block in content if block["type"] == "tool_use"]
+                yield from _stream_buffered_blocks(tool_blocks, 1 if text_open else 0)
             yield _with_log_metadata(
                 {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": output_tokens(current_text)}},
                 account_email,

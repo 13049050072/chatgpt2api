@@ -1,4 +1,4 @@
-import type { Ref } from 'vue'
+import { getCurrentScope, onScopeDispose, type Ref } from 'vue'
 
 import {
   accountsApi,
@@ -67,6 +67,8 @@ function credentialActionMeta(action: AccountCredentialAction) {
 export function useAccountBulkActionsRuntime(options: AccountBulkActionsRuntimeOptions) {
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
+  const progressPolls = new Set<AbortController>()
+  if (getCurrentScope()) onScopeDispose(() => progressPolls.forEach((controller) => controller.abort()))
 
   async function runCredentialActionWithProgress(
     action: AccountCredentialAction,
@@ -87,6 +89,8 @@ export function useAccountBulkActionsRuntime(options: AccountBulkActionsRuntimeO
 
     await options.bulkProgress.start(meta.title, targetCount, meta.kind)
 
+    const poll = new AbortController()
+    progressPolls.add(poll)
     try {
       const request = action === 'sync'
         ? accountsApi.syncAccountsWithProgress
@@ -98,7 +102,7 @@ export function useAccountBulkActionsRuntime(options: AccountBulkActionsRuntimeO
           processed: Math.min(targetCount, Number(progress.processed || 0)),
           done: false,
         })
-      }, targetCount)
+      }, targetCount, poll.signal)
 
       const progress = result.progress
       const operationResult = progress?.result
@@ -115,6 +119,7 @@ export function useAccountBulkActionsRuntime(options: AccountBulkActionsRuntimeO
       else options.accountSelection.removeSelectedIds(completedIds)
       await options.loadData({ silentErrorToast: true })
     } catch (error) {
+      if (poll.signal.aborted) return
       options.bulkProgress.fail(
         targetCount,
         Number(options.bulkProgress.refreshProgress.value?.processed || 0),
@@ -123,6 +128,7 @@ export function useAccountBulkActionsRuntime(options: AccountBulkActionsRuntimeO
       options.setError(`${meta.title}失败`, error, false)
       await options.loadData({ silentErrorToast: true })
     } finally {
+      progressPolls.delete(poll)
       options.bulkProgress.end()
     }
   }

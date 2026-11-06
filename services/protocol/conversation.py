@@ -27,6 +27,7 @@ from services.image_failure import (
     ImageFailure,
     ImageFailureError,
     ImageGenerationError,
+    ImageStorageFailedError,
     ImagePollTimeoutError,
     classify_conversation_failure,
     classify_image_exception,
@@ -49,6 +50,7 @@ from services.realtime_monitor_service import realtime_monitor_service
 from utils.helper import (
     IMAGE_MODELS,
     UpstreamHTTPError,
+    count_message_image_parts,
     extract_image_from_message_content,
     is_codex_image_model,
     is_supported_image_model,
@@ -386,8 +388,26 @@ def is_token_invalid_error(message: str) -> bool:
     )
 
 
+def validate_image_bytes(data: bytes) -> None:
+    """Reject undecodable user images before any upstream account is used."""
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image.verify()
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
+        raise ImageGenerationError(
+            "image input is not a valid image",
+            failure=image_failure("invalid_image_input", raw_detail=str(exc)),
+        ) from exc
+
+
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
-    return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
+    encoded: list[str] = []
+    for data, _, _ in images:
+        if not data:
+            continue
+        validate_image_bytes(data)
+        encoded.append(base64.b64encode(data).decode("ascii"))
+    return encoded
 
 
 def save_image_bytes(
@@ -417,7 +437,7 @@ def save_image_bytes(
             "attempt": attempt + 1,
             "error": diagnostic_excerpt(repr(last_error), 500),
         })
-    raise ImageDownloadError(
+    raise ImageStorageFailedError(
         f"image result storage failed: {diagnostic_excerpt(last_error, 500)}"
     ) from last_error
 
@@ -455,6 +475,25 @@ def _tool_transcript(message: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+MAX_CONVERSATION_IMAGES = 16
+
+
+def _conversation_image_budgets(messages: list[Any]) -> tuple[dict[int, int], int]:
+    """Spend the image budget on the newest user messages first."""
+    user_positions = [
+        position
+        for position, message in enumerate(messages)
+        if isinstance(message, dict) and str(message.get("role") or "user") in {"user", "tool"}
+    ]
+    budgets: dict[int, int] = {}
+    remaining = MAX_CONVERSATION_IMAGES
+    for position in reversed(user_positions):
+        budget = min(count_message_image_parts(messages[position].get("content")), remaining)
+        budgets[position] = budget
+        remaining -= budget
+    return budgets, (user_positions[-1] if user_positions else -1)
+
+
 def normalize_messages(messages: object, system: Any = None) -> list[dict[str, Any]]:
     normalized = []
     if config.global_system_prompt:
@@ -463,7 +502,8 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
     if system_text:
         normalized.append({"role": "system", "content": system_text})
     if isinstance(messages, list):
-        for message in messages:
+        image_budgets, latest_user_position = _conversation_image_budgets(messages)
+        for position, message in enumerate(messages):
             if not isinstance(message, dict):
                 continue
             role = str(message.get("role") or "user")
@@ -478,8 +518,18 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
             if tool_text:
                 text = f"{text}\n{tool_text}".strip() if text else tool_text
             images: list[tuple[bytes, str]] = []
-            if role == "user":
-                images.extend(extract_image_from_message_content(content))
+            if role == "user" and image_budgets.get(position, 0) > 0:
+                try:
+                    images.extend(extract_image_from_message_content(content, limit=image_budgets[position]))
+                except HTTPException as exc:
+                    if position == latest_user_position:
+                        raise
+                    # Earlier turns may reference expired signed URLs; keep their text.
+                    logger.warning({
+                        "event": "history_image_skipped",
+                        "message_index": position,
+                        "error": diagnostic_excerpt(exc.detail, 300),
+                    })
                 if isinstance(content, list):
                     for part in content:
                         if not isinstance(part, dict) or part.get("type") != "image":
@@ -565,7 +615,7 @@ def convert_image_bytes(image_data: bytes, output_format: object) -> bytes:
             image.save(output, format="PNG", optimize=True)
         return output.getvalue()
     except Exception as exc:
-        raise ImageDownloadError(
+        raise ImageStorageFailedError(
             f"image output format conversion failed: {normalized_output_format}"
         ) from exc
 
@@ -812,6 +862,9 @@ def strip_history(text: str, history_text: str = "") -> str:
     return str(text or "")
 
 
+_REMOVED_ANNOTATION = "\ufdd0"
+
+
 def sanitize_output_text(text: str) -> str:
     text = str(text or "")
 
@@ -851,10 +904,50 @@ def sanitize_output_text(text: str) -> str:
     # ChatGPT web sometimes returns rich annotation markers using private-use
     # characters. API clients cannot render those. Preserve readable labels
     # from entity/link annotations, while removing internal citation pointers.
-    text = re.sub(r"\ue200([^\ue201]*)\ue201", replace_annotation, text)
+    text = re.sub(
+        r"\ue200([^\ue201]*)\ue201",
+        lambda match: replace_annotation(match) or _REMOVED_ANNOTATION,
+        text,
+    )
     text = re.sub(r"\ue200[^\ue201]*$", "", text)
-    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
-    return text
+    # Only whitespace left in front of a removed citation is dropped before
+    # punctuation; other text, including code, keeps its spacing.
+    text = re.sub(rf"\s*{_REMOVED_ANNOTATION}+(?=[.,;:!?])", "", text)
+    return text.replace(_REMOVED_ANNOTATION, "")
+
+
+def stream_stable_text(text: str) -> str:
+    """Hold back trailing whitespace so later sanitizing never edits sent text."""
+    return str(text or "").rstrip()
+
+
+def _same_assistant_text(upstream_text: str, history_text: str) -> bool:
+    """Compare a raw upstream replay with the client's copy of that reply."""
+    if upstream_text == history_text:
+        return True
+    return stream_stable_text(sanitize_output_text(upstream_text)) == stream_stable_text(
+        sanitize_output_text(history_text)
+    )
+
+
+_NON_ANSWER_CONTENT_TYPES = {"code", "thoughts", "reasoning_recap"}
+
+
+def _is_non_answer_assistant_event(event: dict[str, Any]) -> bool:
+    """Whether a snapshot carries an assistant message meant for a tool, not the user."""
+    for candidate in (event, event.get("v")):
+        if not isinstance(candidate, dict):
+            continue
+        message = candidate.get("message")
+        if not isinstance(message, dict):
+            continue
+        if str((message.get("author") or {}).get("role") or "").strip().lower() != "assistant":
+            return False
+        recipient = str(message.get("recipient") or "").strip().lower()
+        content = message.get("content") if isinstance(message.get("content"), dict) else {}
+        content_type = str(content.get("content_type") or "").strip().lower()
+        return recipient not in {"", "all"} or content_type in _NON_ANSWER_CONTENT_TYPES
+    return False
 
 
 def assistant_raw_text(event: dict[str, Any], current_text: str = "", history_text: str = "") -> str:
@@ -1153,11 +1246,15 @@ def iter_conversation_payloads(
         *,
         classify_terminal_text_as_image_failure: bool = True,
         submitted_message_ids: Iterable[str] | None = None,
+        skip_tool_messages: bool = False,
 ) -> Iterator[dict[str, Any]]:
     state = ConversationState()
     history_messages = history_messages or []
     history_index = 0
     submitted_ids = {str(item).strip() for item in submitted_message_ids or () if str(item).strip()}
+    text_message_id = ""
+    repeated_message_text = ""
+    message_separator = ""
     for payload in payloads:
         # print(f"[upstream_sse] {payload}", flush=True)
         if not payload:
@@ -1174,6 +1271,16 @@ def iter_conversation_payloads(
         if not isinstance(event, dict):
             yield conversation_base_event("conversation.event", state, raw=event)
             continue
+        if skip_tool_messages and _is_non_answer_assistant_event(event):
+            update_conversation_state(
+                state,
+                payload,
+                event,
+                state.raw_text,
+                classify_terminal_text_as_image_failure=classify_terminal_text_as_image_failure,
+            )
+            yield conversation_base_event("conversation.event", state, raw=event)
+            continue
         next_raw_text = assistant_raw_text(event, state.raw_text, history_text)
         update_conversation_state(
             state,
@@ -1185,14 +1292,17 @@ def iter_conversation_payloads(
         replay_text = event_assistant_text(event, history_text)
         message_id = str(extract_message_facts(event).get("message_id") or "").strip()
         replayed_input = bool(message_id and message_id in submitted_ids)
+        replays_next_history = (
+            history_index < len(history_messages)
+            and _same_assistant_text(replay_text, history_messages[history_index])
+        )
         replayed_snapshot = (
             not message_id
             and not _is_live_text_patch(event)
-            and history_index < len(history_messages)
-            and replay_text == history_messages[history_index]
+            and replays_next_history
         )
         if replayed_input or replayed_snapshot:
-            if history_index < len(history_messages) and replay_text == history_messages[history_index]:
+            if replays_next_history:
                 history_index += 1
             # A replay can arrive after the new answer has started. Clearing
             # here would discard that partial text.
@@ -1200,11 +1310,34 @@ def iter_conversation_payloads(
                 state.raw_text = ""
                 state.text = ""
             continue
-        next_text = sanitize_output_text(next_raw_text)
+        next_text = stream_stable_text(sanitize_output_text(next_raw_text))
         state.raw_text = next_raw_text
-        if next_text != state.text:
-            delta = next_text[len(state.text):] if next_text.startswith(state.text) else next_text
+        if message_id and replay_text and message_id != text_message_id:
+            # Snapshots carry one message's full text, so a second assistant
+            # message in the turn streams from its own start.
+            if text_message_id and state.text:
+                repeated_message_text = state.text
+                message_separator = "\n\n"
+            text_message_id = message_id
+            state.text = ""
+        if repeated_message_text:
+            # Hold text that so far only repeats the previous message: a resend
+            # under a new id must not be delivered twice.
+            if repeated_message_text.startswith(next_text):
+                yield conversation_base_event("conversation.event", state, raw=event)
+                continue
+            if next_text.startswith(repeated_message_text):
+                state.text = repeated_message_text
+                message_separator = ""
+            repeated_message_text = ""
+        # Deltas only ever append to what was already sent; a rewritten or
+        # shorter snapshot must not resend or duplicate delivered text.
+        if len(next_text) > len(state.text):
+            delta = next_text[len(state.text):]
             state.text = next_text
+            if message_separator:
+                delta = message_separator + delta
+                message_separator = ""
             yield conversation_base_event("conversation.delta", state, raw=event, delta=delta)
             continue
         yield conversation_base_event("conversation.event", state, raw=event)
@@ -1261,6 +1394,7 @@ def conversation_events(
         history_messages,
         classify_terminal_text_as_image_failure=image_model,
         submitted_message_ids=getattr(backend, "submitted_message_ids", ()),
+        skip_tool_messages=not image_model,
     )
 
 
@@ -2154,7 +2288,9 @@ def stream_codex_image_outputs(
         quality=request.quality,
         output_format=request.output_format,
     ))
-    images = _codex_response_images(events)
+    # The same image_generation_call can appear in both output_item.done and
+    # response.completed.
+    images = list(dict.fromkeys(_codex_response_images(events)))
     failure: ImageFailure | None = None
     for event in events:
         candidate = classify_upstream_message(event)
@@ -2391,6 +2527,8 @@ def _generate_single_image(
                         expected_last_token_refresh_at=attempt_last_token_refresh_at,
                     )
             except Exception as exc:
+                # Both calls release the slot before any step that can fail, so a
+                # second release here would undercount another request's slot.
                 logger.warning({
                     "event": "image_account_result_update_failed",
                     "account_email": account_email,
@@ -2398,14 +2536,6 @@ def _generate_single_image(
                     "failure_code": failure.code if failure is not None else "",
                     "error": diagnostic_excerpt(exc, 500),
                 })
-                try:
-                    account_service.release_image_slot(token)
-                except Exception as release_exc:
-                    logger.warning({
-                        "event": "image_account_slot_release_failed",
-                        "account_email": account_email,
-                        "error": diagnostic_excerpt(release_exc, 500),
-                    })
             attempt: dict[str, Any] = {
                 "slot": index,
                 "attempt": len(image_attempts) + 1,
@@ -2479,6 +2609,7 @@ def _generate_single_image(
         attempt_refresh_token = str(account.get("refresh_token") or "").strip()
         attempt_last_token_refresh_at = account.get("last_token_refresh_at")
         account_email = str(account.get("email") or "").strip()
+        attempt_account_id = str(account.get("management_id") or "").strip()
         if pending_switch_attempt_index is not None:
             previous_attempt = image_attempts[pending_switch_attempt_index]
             previous_attempt["switched_account"] = True
@@ -2855,6 +2986,9 @@ def _generate_single_image(
                 ):
                     if hasattr(exc, attr):
                         setattr(image_error, attr, getattr(exc, attr))
+            # A timed-out poll can only be resumed by the account that owns the conversation.
+            if attempt_account_id and not getattr(image_error, "account_id", ""):
+                setattr(image_error, "account_id", attempt_account_id)
 
             logger.warning({
                 "event": "image_attempt_failed",
@@ -2873,7 +3007,7 @@ def _generate_single_image(
                 False,
                 failure=failure,
                 error=image_error,
-                quota_consumed=(failure.code == "image_download_failed"),
+                quota_consumed=(failure.code in {"image_download_failed", "image_storage_failed"}),
             )
             attach_attempts(image_error)
             if retry_with_different_account(failure, image_error):
@@ -3118,9 +3252,13 @@ def stream_image_chunks(
                 if not isinstance(item, dict):
                     continue
                 b64_json = str(item.get("b64_json") or "").strip()
-                if not b64_json:
+                url = str(item.get("url") or "").strip()
+                if b64_json:
+                    completed: dict[str, Any] = {"b64_json": b64_json}
+                elif url:
+                    completed = {"url": url}
+                else:
                     continue
-                completed: dict[str, Any] = {"b64_json": b64_json}
                 if usage_builder:
                     usage = usage_builder([item])
                     if usage:

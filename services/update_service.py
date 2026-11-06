@@ -17,6 +17,7 @@ from urllib.parse import urljoin, urlparse
 from curl_cffi import requests as curl_requests
 
 from contracts.updates import UpdateTaskEventView, UpdateTaskView
+from services.config import BASE_DIR, DATA_DIR
 from services.json_file import read_json_object, write_json_file
 from services.update_status_service import (
     _compare_versions,
@@ -328,7 +329,8 @@ class UpdateService:
         self._fetch_release = fetch_release
         self._installer = installer or ReleaseBundleInstaller(runtime_mode=runtime_mode)
         self._runtime_mode = runtime_mode
-        self._state_path = state_path or self._installer.root.joinpath("data", "update_task.json")
+        data_dir = DATA_DIR if self._installer.root == BASE_DIR.resolve() else self._installer.root / "data"
+        self._state_path = state_path or data_dir / "update_task.json"
         self._run_worker = run_worker or self._start_worker_thread
         self._schedule_exit_callback = schedule_exit or self._schedule_exit_timer
         self._exit_process = exit_process

@@ -27,6 +27,10 @@ export interface StudioMessage {
   error?: string
   attachments?: string[]
   referenceImages?: StudioReferenceImage[]
+  /** Prompt actually sent upstream when it differs from the displayed content. */
+  requestPrompt?: string
+  /** Number of image files sent with the request; retries must resend the same images. */
+  requestFileCount?: number
   inpaintSource?: StudioImageCompareSource
   searchSources?: StudioSearchSource[]
   searchImageGroups?: StudioSearchImageGroup[]
