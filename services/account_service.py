@@ -15,6 +15,7 @@ from services.account_credentials import (
     ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     access_token_expires_in_seconds,
     access_token_issued_at,
+    credential_email,
     decode_access_token_payload,
     project_upstream_credential_availability,
 )
@@ -1173,7 +1174,11 @@ class AccountService:
         normalized["status"] = self._normalize_account_status(normalized.get("status"), normalized)
         normalized.pop("enabled", None)
         normalized.pop("auto_disabled", None)
-        normalized["email"] = normalized.get("email") or None
+        normalized["email"] = (
+            normalized.get("email")
+            or credential_email(access_token, normalized.get("id_token") or "")
+            or None
+        )
         normalized["user_id"] = normalized.get("user_id") or None
         normalized["proxy"] = str(normalized.get("proxy") or "").strip()
         source_type = normalized.get("source_type")
@@ -3582,6 +3587,22 @@ class AccountService:
                 and resolved_replacement != access_token
             ):
                 raise ValueError("access token already belongs to another account")
+            if next_access_token != access_token and "email" not in normalized_updates:
+                # Only an email read from the old credentials follows the new ones;
+                # updating by ID does not check identity, so the owner may change.
+                current_email = str(current.get("email") or "").strip()
+                previous_email = credential_email(access_token, str(current.get("id_token") or ""))
+                next_email = credential_email(
+                    next_access_token,
+                    str(normalized_updates.get("id_token") or ""),
+                )
+                if (
+                    current_email
+                    and next_email
+                    and current_email.lower() == previous_email.lower()
+                    and next_email.lower() != current_email.lower()
+                ):
+                    normalized_updates["email"] = next_email
 
             refresh_token_changed = (
                 "refresh_token" in normalized_updates
@@ -5315,16 +5336,12 @@ class AccountService:
                 continue
 
             access_payload = self._decode_jwt_payload(access_token)
-            id_payload = self._decode_jwt_payload(id_token)
             auth_claim = access_payload.get("https://api.openai.com/auth")
             auth_claim = auth_claim if isinstance(auth_claim, dict) else {}
-            profile_claim = access_payload.get("https://api.openai.com/profile")
-            profile_claim = profile_claim if isinstance(profile_claim, dict) else {}
 
             email = (
                 str(account.get("email") or "").strip()
-                or str(profile_claim.get("email") or "").strip()
-                or str(id_payload.get("email") or "").strip()
+                or credential_email(access_token, id_token)
             )
             account_id = (
                 str(account.get("account_id") or "").strip()

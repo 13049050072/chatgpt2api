@@ -37,6 +37,12 @@ def decode_access_token_payload(access_token: str) -> dict[str, object]:
         return {}
 
 
+def credential_email(access_token: str, id_token: str = "") -> str:
+    profile = decode_access_token_payload(access_token).get("https://api.openai.com/profile")
+    email = profile.get("email") if isinstance(profile, dict) else None
+    return str(email or decode_access_token_payload(id_token).get("email") or "").strip()
+
+
 def _positive_timestamp(claims: dict[str, object], name: str) -> int | None:
     try:
         value = int(claims.get(name) or 0)
