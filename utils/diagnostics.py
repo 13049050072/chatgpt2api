@@ -95,7 +95,11 @@ def sanitize_diagnostic_text(
         text,
     )
     text = re.sub(
-        r"(?i)(?<![a-z0-9])((?:\[[0-9a-f:.]+\]|localhost|"
+        r"(?i)(?<![a-z0-9])"
+        # An ISO date-time with an offset ("2026-11-06T19:00:53+08:00") has the
+        # same host:port:user:pass shape, starting at any of its date parts.
+        r"(?!(?:\d{4}-)?(?:\d{2}-)?\d{2}t\d{2}:\d{2}:)"
+        r"((?:\[[0-9a-f:.]+\]|localhost|"
         r"\d{1,3}(?:\.\d{1,3}){3}|"
         r"(?=[a-z0-9.-]*[a-z])[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?):\d{1,5}):"
         r"[^:\s,;]+:[^\s,;]+",
