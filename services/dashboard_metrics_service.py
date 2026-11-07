@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import threading
-from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any, Iterable
 

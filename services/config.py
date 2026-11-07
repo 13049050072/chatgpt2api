@@ -13,7 +13,7 @@ from contracts.settings_specification import (
     normalize_integer_setting,
     numeric_setting_spec,
 )
-from services.json_file import read_json_object, write_json_file
+from services.json_file import read_json_object
 from services.storage.base import StorageBackend
 from services.storage.configuration_repository import (
     AccountGroupRepository,

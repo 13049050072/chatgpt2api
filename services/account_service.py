@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
