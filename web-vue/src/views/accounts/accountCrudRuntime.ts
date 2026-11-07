@@ -16,6 +16,7 @@ export type AccountForm = {
   email: string
   access_token: string
   refresh_token: string
+  id_token: string
   type: string
   source_type: AccountSourceType
   group_id: string
@@ -38,6 +39,7 @@ function createDefaultForm(): AccountForm {
     email: '',
     access_token: '',
     refresh_token: '',
+    id_token: '',
     type: '',
     source_type: 'web',
     group_id: '',
@@ -136,6 +138,7 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
       form.email = detail.email
       form.access_token = ''
       form.refresh_token = ''
+      form.id_token = ''
       form.type = detail.configuration.type
       form.source_type = (detail.configuration.source_type || detail.source) as AccountSourceType
       form.group_id = detail.configuration.group_id
@@ -171,6 +174,7 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
         id: payloadId,
         access_token: form.access_token.trim() || undefined,
         refresh_token: form.refresh_token.trim() || undefined,
+        id_token: form.id_token.trim() || undefined,
         type: form.type.trim(),
         source_type: form.source_type,
         group_id: form.group_id.trim(),

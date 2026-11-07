@@ -1,6 +1,11 @@
 import { nextTick, ref } from 'vue'
 
-import { accountsApi, type AccountImportPayload, type AccountSourceType } from '@/api/accounts'
+import {
+  accountsApi,
+  type AccountImportPayload,
+  type AccountImportSourceType,
+  type AccountSourceType,
+} from '@/api/accounts'
 import {
   accountImportsApi,
   type RemoteAccountImportStarted,
@@ -281,7 +286,7 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
 
   async function importAccountPayloadBatch(
     accountPayloads: AccountImportPayload[],
-    sourceType: AccountSourceType,
+    sourceType: AccountImportSourceType,
     title: string,
     syncAfterImport = false,
     restore = false,
@@ -674,7 +679,7 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
           true,
         )
       } else {
-        await importAccountPayloadBatch(accountPayloads, 'codex', title, true, false, true, true)
+        await importAccountPayloadBatch(accountPayloads, 'auto', title, true, false, true, true)
       }
     } catch (error) {
       const message = options.normalizeErrorMessage(error)

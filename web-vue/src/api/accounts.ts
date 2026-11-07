@@ -3,6 +3,8 @@ import type { ProxyGroup } from './proxy'
 
 export type AccountLane = 'fast' | 'thinking' | 'pro'
 export type AccountSourceType = 'web' | 'codex'
+// `auto` lets the backend pick the source from the OAuth client that issued the credentials.
+export type AccountImportSourceType = AccountSourceType | 'auto'
 export type AccountSourceFilter = 'all' | AccountSourceType
 export type AccountBackendStatus = '正常' | '限流' | '异常' | '禁用'
 export type AccountStatusCategory = 'normal' | 'limited' | 'abnormal' | 'disabled'
@@ -279,6 +281,7 @@ export type AccountUpsertPayload = {
   id?: string
   access_token?: string
   refresh_token?: string
+  id_token?: string
   type?: string
   source_type?: AccountSourceType
   group_id?: string
@@ -651,6 +654,7 @@ export const accountsApi = {
           id: string
           access_token?: string
           refresh_token?: string
+          id_token?: string
           type?: string
           source_type?: AccountSourceType
           quota?: number
@@ -662,6 +666,7 @@ export const accountsApi = {
         id: accountId,
         access_token: payload.access_token,
         refresh_token: payload.refresh_token,
+        id_token: payload.id_token,
         type: payload.type,
         source_type: payload.source_type,
         quota: payload.quota,
@@ -689,6 +694,7 @@ export const accountsApi = {
       accounts: [{
         access_token: accessToken,
         refresh_token: cleanString(payload.refresh_token) || undefined,
+        id_token: cleanString(payload.id_token) || undefined,
         type: payload.type,
         source_type: payload.source_type,
         status: STATUS_NORMAL,
@@ -711,7 +717,7 @@ export const accountsApi = {
 
   importAccounts: async (
     accountPayloads: AccountImportPayload[],
-    fallbackSourceType: AccountSourceType = 'web',
+    fallbackSourceType: AccountImportSourceType = 'web',
     options: AccountImportOptions = {},
   ) => {
     const deduped = new Map<string, AccountImportPayload>()

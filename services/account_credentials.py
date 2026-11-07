@@ -43,6 +43,21 @@ def credential_email(access_token: str, id_token: str = "") -> str:
     return str(email or decode_access_token_payload(id_token).get("email") or "").strip()
 
 
+def credential_client_id(access_token: str, id_token: str = "") -> str:
+    """OAuth client that issued the credentials, or "" when they don't say.
+
+    The ID token arrives with the refresh token, so its audience wins over the
+    access token, which may come from a different login.
+    """
+    for token, claim in ((id_token, "aud"), (access_token, "client_id")):
+        values = decode_access_token_payload(str(token or "").strip()).get(claim)
+        for value in values if isinstance(values, list) else [values]:
+            candidate = str(value or "").strip()
+            if candidate.startswith("app_"):
+                return candidate
+    return ""
+
+
 def _positive_timestamp(claims: dict[str, object], name: str) -> int | None:
     try:
         value = int(claims.get(name) or 0)

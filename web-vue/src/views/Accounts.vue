@@ -302,6 +302,17 @@
                       spellcheck="false"
                     ></textarea>
                   </label>
+                  <label class="block text-xs md:col-span-2">
+                    <span class="ui-field-label">ID Token（可选）</span>
+                    <textarea
+                      v-model.trim="form.id_token"
+                      rows="2"
+                      class="ui-textarea-sm font-mono"
+                      :placeholder="editingId ? '留空表示不修改；补 RT 时请填写同一次登录的 ID Token' : '填写 RT 时请一并填写同一次登录的 ID Token'"
+                      autocomplete="off"
+                      spellcheck="false"
+                    ></textarea>
+                  </label>
                   </div>
                 </FormSection>
 

@@ -39,7 +39,7 @@ from services.account_operation_events import (
 )
 from services.account_import_job import RemoteImportJobConflictError
 from services.account_test_service import account_test_service
-from services.account_service import account_service
+from services.account_service import AccountService, account_service
 from services.account_view import account_detail, account_row, account_status_category
 from services.config import config
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
@@ -1453,7 +1453,7 @@ def create_router() -> APIRouter:
         source_by_token = {token: "web" for token in _unique_tokens(body.tokens)}
         for item, token in zip(account_payloads, payload_tokens):
             if token:
-                source_by_token[token] = _clean_text(item.get("source_type")) or "web"
+                source_by_token[token] = AccountService.import_source_type(item)
         outcome_by_token: dict[str, str] = {}
         for token, outcome in token_outcomes:
             if token:

@@ -15,6 +15,7 @@ from services.account_credentials import (
     ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     access_token_expires_in_seconds,
     access_token_issued_at,
+    credential_client_id,
     credential_email,
     decode_access_token_payload,
     project_upstream_credential_availability,
@@ -363,6 +364,33 @@ class AccountService:
             and incoming_refresh_token
             and incoming_refresh_token != str(item.get("refresh_token") or "").strip()
         )
+
+    def _fill_missing_refresh_token_locked(self, token: str, payload: dict) -> bool:
+        """Give an account without an RT the RT and ID token of an earlier login.
+
+        The stored access token is newer and stays. The ID token names the client
+        the RT renews with, so an RT that arrives without one is not taken.
+        """
+        current = self._accounts.get(token)
+        refresh_token = str(payload.get("refresh_token") or "").strip()
+        id_token = str(payload.get("id_token") or "").strip()
+        if (
+            current is None
+            or str(current.get("refresh_token") or "").strip()
+            or not refresh_token
+            or not id_token
+        ):
+            return False
+        account = self._normalize_account({
+            **current,
+            "refresh_token": refresh_token,
+            "id_token": id_token,
+            "refresh_token_invalid_at": None,
+        })
+        if account is None:
+            return False
+        self._accounts[token] = account
+        return True
 
     @staticmethod
     def _management_id_for_token(access_token: str) -> str:
@@ -1473,15 +1501,26 @@ class AccountService:
         access token, which a later import may have replaced on its own.
         """
         item = account or {}
-        for field, claim in (("id_token", "aud"), ("access_token", "client_id")):
-            token = str(item.get(field) or "").strip()
-            claims = decode_access_token_payload(token) if token else {}
-            values = claims.get(claim) if isinstance(claims, dict) else None
-            for value in values if isinstance(values, list) else [values]:
-                candidate = str(value or "").strip()
-                if candidate.startswith("app_"):
-                    return candidate
-        return cls._OAUTH_CLIENT_ID
+        return credential_client_id(
+            str(item.get("access_token") or ""),
+            str(item.get("id_token") or ""),
+        ) or cls._OAUTH_CLIENT_ID
+
+    @classmethod
+    def _credential_source_type(cls, payload: dict) -> str:
+        # Platform-client credentials are what this service keeps on Web accounts
+        # (OAuth login, RT renewal); anything else stays a Codex import.
+        client_id = credential_client_id(
+            str(payload.get("access_token") or ""),
+            str(payload.get("id_token") or ""),
+        )
+        return "web" if client_id == cls._OAUTH_CLIENT_ID else "codex"
+
+    @classmethod
+    def import_source_type(cls, item: dict) -> str:
+        """Source an import payload is stored under once `auto` and format markers apply."""
+        payload = cls._prepare_account_payload(item) or {}
+        return cls._normalize_source_type(payload.get("source_type"))
 
     def _request_access_token_refresh(
         self,
@@ -2854,6 +2893,7 @@ class AccountService:
             payload.pop("management_id", None)
             payload.pop("access_token_fingerprints", None)
         payload["access_token"] = access_token
+        resolve_source = str(payload.get("source_type") or "").strip().lower() == "auto"
         # CPA/Codex 导出文件里的 `type=codex` 是导出格式，不是号池套餐类型。
         if str(payload.get("type") or "").strip().lower() == "codex":
             payload["export_type"] = "codex"
@@ -2861,6 +2901,9 @@ class AccountService:
             payload.pop("type", None)
         if str(payload.get("export_type") or "").strip().lower() == "codex":
             payload["source_type"] = "codex"
+        if resolve_source:
+            # `auto` 按签发凭据的客户端判断来源，优先于导出格式标记。
+            payload["source_type"] = AccountService._credential_source_type(payload)
         if payload.get("plan_type") and not payload.get("type"):
             payload["type"] = str(payload.get("plan_type") or "").strip()
         return payload
@@ -3086,8 +3129,12 @@ class AccountService:
                             and self._issued_before(access_token, matched_token)
                             and not self._older_login_may_replace(self._accounts.get(matched_token), payload)
                         ):
-                            skipped += 1
-                            outcomes_by_token[access_token] = "stale"
+                            if self._fill_missing_refresh_token_locked(matched_token, payload):
+                                updated += 1
+                                outcomes_by_token[access_token] = "updated"
+                            else:
+                                skipped += 1
+                                outcomes_by_token[access_token] = "stale"
                             continue
                         if matched_token:
                             old_token = matched_token
