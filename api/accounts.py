@@ -1450,10 +1450,12 @@ def create_router() -> APIRouter:
                 detail={"error": str(exc)},
             ) from exc
 
-        source_by_token = {token: "web" for token in _unique_tokens(body.tokens)}
+        sources_by_token: dict[str, tuple[str, ...]] = {
+            token: ("web",) for token in _unique_tokens(body.tokens)
+        }
         for item, token in zip(account_payloads, payload_tokens):
             if token:
-                source_by_token[token] = AccountService.import_source_type(item)
+                sources_by_token[token] = AccountService.import_lookup_sources(item)
         outcome_by_token: dict[str, str] = {}
         for token, outcome in token_outcomes:
             if token:
@@ -1464,7 +1466,11 @@ def create_router() -> APIRouter:
         sensitive_values = list(tokens)
         proxy_values: list[str] = []
         for token in tokens:
-            account = _get_account_by_token_identity(token, source_by_token.get(token))
+            account = None
+            for source in sources_by_token.get(token, ("web",)):
+                account = _get_account_by_token_identity(token, source)
+                if account is not None:
+                    break
             account_id = _clean_text((account or {}).get("management_id"))
             active_token = _clean_text((account or {}).get("access_token")) or token
             if account_id and account_id not in target_ids:

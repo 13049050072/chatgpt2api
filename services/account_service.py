@@ -1517,10 +1517,32 @@ class AccountService:
         return "web" if client_id == cls._OAUTH_CLIENT_ID else "codex"
 
     @classmethod
-    def import_source_type(cls, item: dict) -> str:
-        """Source an import payload is stored under once `auto` and format markers apply."""
+    def import_lookup_sources(cls, item: dict) -> tuple[str, ...]:
+        """Sources to search, in order, for the account an import payload ended up in."""
         payload = cls._prepare_account_payload(item) or {}
-        return cls._normalize_source_type(payload.get("source_type"))
+        source = str(payload.get("source_type") or "").strip().lower()
+        if source == "auto":
+            # Platform credentials fall back to a Codex account created by earlier file imports.
+            return ("web", "codex") if cls._credential_source_type(payload) == "web" else ("codex",)
+        return (cls._normalize_source_type(source),)
+
+    def _find_platform_codex_match_locked(
+        self,
+        index: dict[_IdentityIndexKey, list[str]],
+        access_token: str,
+    ) -> str:
+        """A Codex account of the same user that holds platform credentials.
+
+        File imports stored platform credentials as Codex before `auto` existed;
+        updating that account keeps them from turning into a second, Web copy.
+        Codex accounts with credentials from another client stay separate.
+        """
+        matched_token = self._find_identity_match_locked(index, access_token, "codex")
+        account = self._accounts.get(matched_token) if matched_token else None
+        if account is None:
+            return ""
+        client_id = credential_client_id(matched_token, str(account.get("id_token") or ""))
+        return matched_token if client_id == self._OAUTH_CLIENT_ID else ""
 
     def _request_access_token_refresh(
         self,
@@ -2893,17 +2915,16 @@ class AccountService:
             payload.pop("management_id", None)
             payload.pop("access_token_fingerprints", None)
         payload["access_token"] = access_token
-        resolve_source = str(payload.get("source_type") or "").strip().lower() == "auto"
+        # `auto` 由导入时按签发凭据的客户端和已有账号决定来源，导出格式标记不覆盖它。
+        auto_source = str(payload.get("source_type") or "").strip().lower() == "auto"
         # CPA/Codex 导出文件里的 `type=codex` 是导出格式，不是号池套餐类型。
         if str(payload.get("type") or "").strip().lower() == "codex":
             payload["export_type"] = "codex"
-            payload["source_type"] = "codex"
+            if not auto_source:
+                payload["source_type"] = "codex"
             payload.pop("type", None)
-        if str(payload.get("export_type") or "").strip().lower() == "codex":
+        if str(payload.get("export_type") or "").strip().lower() == "codex" and not auto_source:
             payload["source_type"] = "codex"
-        if resolve_source:
-            # `auto` 按签发凭据的客户端判断来源，优先于导出格式标记。
-            payload["source_type"] = AccountService._credential_source_type(payload)
         if payload.get("plan_type") and not payload.get("type"):
             payload["type"] = str(payload.get("plan_type") or "").strip()
         return payload
@@ -3106,6 +3127,12 @@ class AccountService:
             for access_token, payload in deduped.items():
                 current = self._accounts.get(access_token)
                 old_token = access_token
+                auto_source = str(payload.get("source_type") or "").strip().lower() == "auto"
+                if auto_source:
+                    # An account that already holds this token keeps its source.
+                    payload = {key: value for key, value in payload.items() if key != "source_type"}
+                    if current is None:
+                        payload["source_type"] = self._credential_source_type(payload)
                 if current is None:
                     resolved_token = self._resolve_access_token_locked(access_token)
                     fingerprint = self._access_token_fingerprint(access_token)
@@ -3124,6 +3151,10 @@ class AccountService:
                             access_token,
                             payload.get("source_type"),
                         )
+                        if not matched_token and auto_source and payload.get("source_type") == "web":
+                            matched_token = self._find_platform_codex_match_locked(identity_index, access_token)
+                            if matched_token:
+                                payload.pop("source_type", None)
                         if (
                             matched_token
                             and self._issued_before(access_token, matched_token)
