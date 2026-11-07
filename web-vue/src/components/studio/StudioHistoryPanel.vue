@@ -59,7 +59,7 @@
           <form
             v-if="editingId === conversation.id"
             class="studio-history-edit"
-            @submit.prevent="commitRename(conversation.id)"
+            @submit.prevent="submitRename(conversation.id)"
             @click.stop
           >
             <input
@@ -75,6 +75,7 @@
             v-else
             type="button"
             class="studio-history-main"
+            :data-conversation-id="conversation.id"
             :aria-current="conversation.id === activeConversationId ? 'true' : undefined"
             @click="handleSelect(conversation.id)"
             @dblclick.stop="beginRename(conversation)"
@@ -269,9 +270,24 @@ function commitRename(id: string) {
   emit('rename', id, title)
 }
 
+function focusConversationRow(id: string) {
+  void nextTick(() => {
+    historyListRef.value
+      ?.querySelector<HTMLElement>(`.studio-history-main[data-conversation-id="${CSS.escape(id)}"]`)
+      ?.focus()
+  })
+}
+
+function submitRename(id: string) {
+  commitRename(id)
+  focusConversationRow(id)
+}
+
 function cancelRename() {
+  const id = editingId.value
   editingId.value = ''
   editingTitle.value = ''
+  if (id) focusConversationRow(id)
 }
 
 function handleSelect(id: string) {
@@ -559,6 +575,13 @@ function formatConversationTime(conversation: StudioConversation) {
 .studio-history-row-actions:focus-within {
   opacity: 1;
   pointer-events: auto;
+}
+
+@media (hover: none) {
+  .studio-history-row-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .studio-history-icon {

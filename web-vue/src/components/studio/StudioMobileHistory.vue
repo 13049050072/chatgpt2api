@@ -13,7 +13,12 @@
             :style="{ height: `${topSpacerHeight}px` }"
             aria-hidden="true"
           ></div>
-          <div v-for="{ item: conversation } in visibleConversationEntries" :key="conversation.id" class="studio-mobile-history-window-row">
+          <div
+            v-for="{ item: conversation } in visibleConversationEntries"
+            :key="conversation.id"
+            class="studio-mobile-history-window-row"
+            :class="{ 'has-badge': badges[conversation.id] }"
+          >
             <div
               class="studio-mobile-history-item"
               :class="{ 'is-active': conversation.id === activeConversationId }"
@@ -96,6 +101,7 @@ const {
 } = useWindowedList({
   items: computed(() => props.conversations),
   itemHeight: 72,
+  getItemHeight: (conversation) => props.badges[conversation.id] ? 96 : 72,
   overscan: 8,
   disabled: computed(() => !shouldWindowHistory.value),
 })
@@ -174,6 +180,11 @@ function formatTime(value: string) {
   padding-bottom: 0.375rem;
 }
 
+.studio-mobile-history-window-row.has-badge {
+  height: 6rem;
+  flex-basis: 6rem;
+}
+
 .studio-mobile-history-item {
   position: relative;
   width: 100%;
@@ -210,10 +221,12 @@ function formatTime(value: string) {
   white-space: nowrap;
   font-size: 0.875rem;
   font-weight: 650;
+  line-height: 1.25rem;
 }
 
 .studio-mobile-history-meta {
   font-size: 0.75rem;
+  line-height: 1rem;
   color: hsl(var(--muted-foreground));
 }
 
@@ -223,6 +236,7 @@ function formatTime(value: string) {
   padding: 0.125rem 0.5rem;
   font-size: 0.6875rem;
   font-weight: 650;
+  line-height: 1rem;
 }
 
 .studio-mobile-history-badge.is-running {

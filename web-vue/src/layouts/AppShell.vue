@@ -551,7 +551,7 @@
             class="mt-1 text-base font-semibold"
             :class="hasNewVersion ? 'text-amber-800 dark:text-amber-300' : 'text-foreground'"
           >
-            {{ latestVersionLabel }}
+            {{ latestVersionLabel || '未知' }}
           </p>
         </div>
       </div>
@@ -927,9 +927,7 @@ const apiKeyDisplay = computed(() => currentAuthToken.value || '未登录')
 const currentVersionLabel = computed(() => normalizeVersionTag(
   updateStatus.value?.current_tag || currentVersionTag.value || '',
 ))
-const latestVersionLabel = computed(() => normalizeVersionTag(
-  updateStatus.value?.latest_tag || currentVersionTag.value || '',
-))
+const latestVersionLabel = computed(() => normalizeVersionTag(updateStatus.value?.latest_tag || ''))
 const hasNewVersion = computed(() => updateStatus.value?.update_available === true)
 const canStartUpdate = computed(() => updateStatus.value?.can_update === true && !updateProgressState.busy)
 const updateProgressSummary = computed(() => [

@@ -4,6 +4,7 @@
     <Input
       :model-value="start"
       type="date"
+      aria-label="开始日期"
       :root-class="['date-range-input', inputRootClass].filter(Boolean).join(' ')"
       @update:model-value="emit('update:start', String($event || ''))"
     />
@@ -12,6 +13,7 @@
     <Input
       :model-value="end"
       type="date"
+      aria-label="结束日期"
       :root-class="['date-range-input', inputRootClass].filter(Boolean).join(' ')"
       @update:model-value="emit('update:end', String($event || ''))"
     />
