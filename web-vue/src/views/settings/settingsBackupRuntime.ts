@@ -140,6 +140,33 @@ export function useSettingsBackupRuntime(options: SettingsBackupRuntimeOptions) 
     }
   }
 
+  async function verifyBackupItem(item: BackupItem) {
+    if (!options.requireSavedSettings('校验备份')) return
+    const confirmed = await confirmDialog.ask({
+      title: '校验备份',
+      message: `即将从 R2 完整下载备份 ${item.name || item.key}，并用已保存的加密口令校验签名，可能产生下载流量。是否继续？`,
+      confirmText: '开始校验',
+      cancelText: '取消',
+    })
+    if (!confirmed) return
+
+    backupBusy.value = item.key
+    await progressRuntime.start({
+      title: '校验备份',
+      subtitle: item.name || item.key,
+      message: '正在下载并校验备份...',
+    })
+    try {
+      const { result } = await settingsApi.verifyBackup(item.key)
+      if (result.ok) progressRuntime.succeed(result.message)
+      else progressRuntime.fail(result.message)
+    } catch (error) {
+      progressRuntime.fail(errorMessage(error, '校验备份失败'))
+    } finally {
+      backupBusy.value = ''
+    }
+  }
+
   function invalidate() {
     backupsQuery.invalidate()
     backupsLoaded.value = false
@@ -158,6 +185,7 @@ export function useSettingsBackupRuntime(options: SettingsBackupRuntimeOptions) 
     testBackupConnection,
     runBackupNow,
     deleteBackupItem,
+    verifyBackupItem,
     invalidate,
   }
 }

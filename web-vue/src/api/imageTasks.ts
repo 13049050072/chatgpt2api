@@ -36,6 +36,7 @@ export interface ImageTask {
   elapsed_ms: number | null
   error_code: string
   public_error: string
+  display_error: string
   results: ImageTaskAsset[]
   actions: ImageTaskActions
 }
@@ -306,6 +307,7 @@ function parseImageTask(value: unknown, path = 'response'): ImageTask {
     elapsed_ms: expectNullableInteger(raw.elapsed_ms, `${path}.elapsed_ms`),
     error_code: expectString(raw.error_code, `${path}.error_code`),
     public_error: expectString(raw.public_error, `${path}.public_error`),
+    display_error: expectString(raw.display_error, `${path}.display_error`),
     results,
     actions: {
       resume_poll: expectBoolean(actions.resume_poll, `${path}.actions.resume_poll`),

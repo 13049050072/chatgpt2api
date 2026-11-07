@@ -4,7 +4,7 @@ import time
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from services.image_failure import image_failure
+from services.image_failure import display_image_error, image_failure
 
 
 TERMINAL_STATUSES = frozenset({"success", "partial_success", "failed", "text_review"})
@@ -184,6 +184,7 @@ def image_task_row(
         ),
         "error_code": error_code,
         "public_error": public_error,
+        "display_error": display_image_error(error_code, public_error),
         "results": results,
         "actions": {
             "resume_poll": (

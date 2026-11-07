@@ -133,6 +133,22 @@ def _dict(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _backup_encryption_notice(backup: Mapping[str, Any], stored_backup: Mapping[str, Any]) -> str:
+    configured = all((
+        _text(backup.get("account_id")),
+        _text(backup.get("access_key_id")),
+        _text(stored_backup.get("secret_access_key")),
+        _text(backup.get("bucket")),
+    ))
+    if not configured:
+        return ""
+    if not _bool(backup.get("encrypt"), False):
+        return "备份以明文上传到 R2，其中包含账号凭据和密钥；建议启用备份加密并设置加密口令。"
+    if not _text(stored_backup.get("passphrase")):
+        return "已启用备份加密但未设置加密口令，备份会失败；请先设置加密口令。"
+    return ""
+
+
 def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -624,6 +640,7 @@ class SettingsManagementService:
                 encrypt=_bool(backup.get("encrypt"), False),
                 passphrase="",
                 has_passphrase=bool(_text(stored_backup.get("passphrase"))),
+                encryption_notice=_backup_encryption_notice(backup, stored_backup),
                 include=BackupIncludeSettings(**{
                     key: _bool(backup_include.get(key), bool(default))
                     for key, default in DEFAULT_BACKUP_INCLUDE.items()

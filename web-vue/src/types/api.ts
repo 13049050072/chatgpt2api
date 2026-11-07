@@ -125,6 +125,7 @@ export interface Settings {
     encrypt: boolean
     passphrase: string
     has_passphrase: boolean
+    encryption_notice: string
     include: Record<string, boolean>
   }
   third_party_apps: {

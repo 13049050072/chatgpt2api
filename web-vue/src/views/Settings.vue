@@ -110,6 +110,7 @@
         @run-now="runBackupNow"
         @load-backups="loadBackups"
         @delete-item="deleteBackupItem"
+        @verify-item="verifyBackupItem"
       />
 
       <SettingsIntegrationsPanel
@@ -373,6 +374,7 @@ const loadBackups = backupRuntime.loadBackups
 const testBackupConnection = backupRuntime.testBackupConnection
 const runBackupNow = backupRuntime.runBackupNow
 const deleteBackupItem = backupRuntime.deleteBackupItem
+const verifyBackupItem = backupRuntime.verifyBackupItem
 const backupStatusText = computed(() => buildBackupStatusText(backupState.value))
 const externalSourcesRuntime = useSettingsExternalSourcesRuntime({
   runtime: pageRuntime,

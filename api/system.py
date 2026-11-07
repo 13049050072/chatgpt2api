@@ -115,6 +115,8 @@ class LogDeleteRequest(BaseModel):
     ids: list[str] = []
 class BackupDeleteRequest(BaseModel):
     key: str = ""
+class BackupVerifyRequest(BaseModel):
+    key: str = ""
 
 
 class RetentionCleanupRequest(BaseModel):
@@ -596,6 +598,14 @@ def create_router(app_version: str) -> APIRouter:
         try:
             await run_in_threadpool(backup_service.delete_backup, body.key)
             return {"ok": True}
+        except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/backups/verify")
+    async def verify_backup_endpoint(body: BackupVerifyRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"result": await run_in_threadpool(backup_service.verify_backup, body.key)}
         except BackupError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 

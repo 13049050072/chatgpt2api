@@ -12,6 +12,8 @@ import subprocess
 import tarfile
 import tempfile
 import threading
+from collections.abc import Iterable, Iterator
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -76,7 +78,7 @@ BACKUP_MIN_UPLOAD_BYTES_PER_SEC = 256 * 1024
 BACKUP_FILE_CHUNK_BYTES = 1024 * 1024
 
 
-def _upload_timeout(size: int) -> float:
+def _transfer_timeout(size: int) -> float:
     return max(BACKUP_MIN_UPLOAD_TIMEOUT_SECS, size / BACKUP_MIN_UPLOAD_BYTES_PER_SEC + 30.0)
 
 
@@ -114,22 +116,46 @@ def _openssl_encrypt_file(source: Path, target: Path, passphrase: str) -> None:
         raise BackupError(f"加密备份失败：{detail or 'openssl 执行失败'}") from exc
 
 
+def _ciphertext_digest(header: bytes, passphrase: str) -> hmac.HMAC | None:
+    """Start the ciphertext HMAC from an openssl `Salted__` header, keyed from the passphrase and its salt."""
+    if len(header) != 16 or not header.startswith(b"Salted__"):
+        return None
+    key = hashlib.pbkdf2_hmac(
+        "sha256",
+        passphrase.encode("utf-8"),
+        BACKUP_HMAC_KEY_CONTEXT + header[8:],
+        BACKUP_PBKDF2_ITERATIONS,
+    )
+    return hmac.new(key, header, hashlib.sha256)
+
+
 def _ciphertext_hmac(path: Path, passphrase: str) -> str:
     """HMAC-SHA256 over an openssl `Salted__` file, keyed from the passphrase and its salt."""
     with path.open("rb") as source:
-        header = source.read(16)
-        if len(header) != 16 or not header.startswith(b"Salted__"):
+        digest = _ciphertext_digest(source.read(16), passphrase)
+        if digest is None:
             raise BackupError("加密备份失败：openssl 输出缺少盐值")
-        key = hashlib.pbkdf2_hmac(
-            "sha256",
-            passphrase.encode("utf-8"),
-            BACKUP_HMAC_KEY_CONTEXT + header[8:],
-            BACKUP_PBKDF2_ITERATIONS,
-        )
-        digest = hmac.new(key, header, hashlib.sha256)
         while chunk := source.read(BACKUP_FILE_CHUNK_BYTES):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _streamed_ciphertext_hmac(chunks: Iterable[bytes], passphrase: str) -> str | None:
+    """Same digest as `_ciphertext_hmac`, or None when the stream is not an openssl `Salted__` file."""
+    digest: hmac.HMAC | None = None
+    header = b""
+    for chunk in chunks:
+        if digest is not None:
+            digest.update(chunk)
+            continue
+        header += chunk
+        if len(header) < 16:
+            continue
+        digest = _ciphertext_digest(header[:16], passphrase)
+        if digest is None:
+            return None
+        digest.update(header[16:])
+    return digest.hexdigest() if digest is not None else None
 
 
 def _xml_text(document: str, tag: str) -> str:
@@ -238,6 +264,7 @@ class CloudflareR2Client:
         body: bytes = b"",
         extra_headers: dict[str, str] | None = None,
         timeout: float = 60.0,
+        stream: bool = False,
     ):
         object_path = f"/{self.bucket}"
         if key:
@@ -246,7 +273,14 @@ class CloudflareR2Client:
         url = f"{self.endpoint}{object_path}"
         if encoded_query:
             url += f"?{encoded_query}"
-        response = self.session.request(method.upper(), url, headers=headers, data=body, timeout=timeout)
+        response = self.session.request(
+            method.upper(),
+            url,
+            headers=headers,
+            data=body,
+            timeout=timeout,
+            stream=stream,
+        )
         return response
 
     def test_connection(self) -> dict[str, object]:
@@ -269,7 +303,7 @@ class CloudflareR2Client:
             key,
             body=path.read_bytes(),
             extra_headers=headers,
-            timeout=_upload_timeout(size),
+            timeout=_transfer_timeout(size),
         )
         if response.status_code >= 400:
             raise BackupError(f"上传备份失败：HTTP {response.status_code}")
@@ -290,7 +324,7 @@ class CloudflareR2Client:
                         key,
                         query={"partNumber": str(part_number), "uploadId": upload_id},
                         body=chunk,
-                        timeout=_upload_timeout(len(chunk)),
+                        timeout=_transfer_timeout(len(chunk)),
                     )
                     etag = _clean(part.headers.get("etag"))
                     if part.status_code >= 400 or not etag:
@@ -322,6 +356,23 @@ class CloudflareR2Client:
         response = self._request("DELETE", key, timeout=30.0)
         if response.status_code >= 400 and response.status_code != 404:
             raise BackupError(f"删除备份失败：HTTP {response.status_code}")
+
+    def head_object(self, key: str) -> dict[str, str]:
+        response = self._request("HEAD", key, timeout=30.0)
+        if response.status_code == 404:
+            raise BackupError("备份不存在或已被删除")
+        if response.status_code >= 400:
+            raise BackupError(f"读取备份信息失败：HTTP {response.status_code}")
+        return {name.lower(): str(value) for name, value in response.headers.items()}
+
+    def iter_object(self, key: str, *, size: int) -> Iterator[bytes]:
+        response = self._request("GET", key, timeout=_transfer_timeout(size), stream=True)
+        try:
+            if response.status_code >= 400:
+                raise BackupError(f"下载备份失败：HTTP {response.status_code}")
+            yield from response.iter_content()
+        finally:
+            response.close()
 
     def list_objects(self) -> list[dict[str, object]]:
         items: list[dict[str, object]] = []
@@ -517,6 +568,41 @@ class BackupService:
             client.delete_object(candidate)
         finally:
             client.close()
+
+    def verify_backup(self, key: str) -> dict[str, object]:
+        """Re-check an uploaded encrypted backup against the HMAC recorded at upload time."""
+        candidate = _clean(key)
+        if not _is_backup_object(candidate):
+            raise BackupError("备份对象 key 无效")
+
+        def result(status: str, message: str) -> dict[str, object]:
+            return {"key": candidate, "status": status, "ok": status == "valid", "message": message}
+
+        if not candidate.endswith(".enc"):
+            return result("unencrypted", "该备份未加密，没有可校验的签名")
+        settings = config.get_backup_settings()
+        passphrase = _clean(settings.get("passphrase"))
+        if not passphrase:
+            raise BackupError("未设置加密口令，无法校验加密备份")
+        client = CloudflareR2Client(settings)
+        try:
+            client.validate()
+            headers = client.head_object(candidate)
+            expected = _clean(headers.get("x-amz-meta-ciphertext-hmac-sha256")).lower()
+            if not expected:
+                return result("missing_hmac", "该备份上传时没有记录校验值（旧版本创建），无法校验")
+            size = int(headers.get("content-length") or 0)
+            with closing(client.iter_object(candidate, size=size)) as chunks:
+                actual = _streamed_ciphertext_hmac(chunks, passphrase)
+        except requests.exceptions.RequestException as exc:
+            raise BackupError(f"下载备份失败：{exc.__class__.__name__}") from exc
+        finally:
+            client.close()
+        if actual is None:
+            return result("mismatch", "备份文件格式无效，不是可识别的加密备份")
+        if not hmac.compare_digest(actual, expected):
+            return result("mismatch", "校验不一致：备份内容已被修改，或当前口令与创建备份时的口令不同")
+        return result("valid", "校验通过：备份内容与上传时一致")
 
     def run_backup(self, *, trigger: str = "manual") -> dict[str, object]:
         try:

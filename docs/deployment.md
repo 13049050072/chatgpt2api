@@ -136,6 +136,10 @@ openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 \
 
 没有 `x-amz-meta-kdf` 元数据的旧加密备份不含 HMAC，解密时去掉 `-iter 600000`。
 
+也可以在系统设置的备份历史中点击加密备份的“校验”：服务用当前保存的加密口令流式
+读取 R2 上的对象并重新计算 HMAC，与元数据比对后返回结果，不落盘也不解密。下载到
+本地的文件仍应按上面的命令校验后再恢复。
+
 未配置 R2 时，应先停止服务再备份。SQLite 可以在停服后复制 `data/chatgpt2api.db`；
 PostgreSQL 必须使用 `pg_dump --format=custom`，不能用 `tar data/` 代替数据库备份。
 `config.json` 只保留 `auth-key` 等启动配置，也应单独保存：

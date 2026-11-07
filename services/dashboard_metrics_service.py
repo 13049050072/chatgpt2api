@@ -21,6 +21,7 @@ from utils.timezone import beijing_now, parse_to_beijing_naive
 DASHBOARD_METRICS_RETENTION_DAYS = 30
 DASHBOARD_TIME_RANGES = ("24h", "7d", "30d")
 DASHBOARD_METRICS_REFRESH_INTERVAL_SECS = 10.0
+DASHBOARD_METRICS_SYNC_FAILURE_LIMIT = 3
 
 _NON_MODEL_KEYS = {
     "",
@@ -212,6 +213,7 @@ class DashboardMetricsService:
         self._lock = threading.RLock()
         self._ingest_failed = False
         self._stale_reason: str | None = None
+        self._consecutive_sync_failures = 0
 
     def reset_projection_schema_if_needed(self) -> DashboardMetricsSchemaReset:
         """Reset stale physical projection tables without touching Call Records."""
@@ -338,6 +340,7 @@ class DashboardMetricsService:
     def _reset_runtime_ingest_locked(self) -> None:
         self._ingest_failed = False
         self._stale_reason = None
+        self._consecutive_sync_failures = 0
 
     def sync_from_log_service(self, log_source: Any) -> bool:
         """Process only new Call Records, rebuilding after destructive changes."""
@@ -469,6 +472,7 @@ class DashboardMetricsService:
                             raise
                 raise RuntimeError("dashboard metrics synchronization did not converge")
             except Exception as exc:
+                self._consecutive_sync_failures += 1
                 # Writes are transactional, so a transient failure leaves the cursor and
                 # buckets intact; only a source mismatch needs the destructive rebuild.
                 if force_rebuild or isinstance(exc, (LogCursorMismatch, DashboardMetricsSourceChanged)):
@@ -573,7 +577,8 @@ class DashboardMetricsService:
         *,
         now: datetime,
     ) -> dict[str, Any]:
-        ready = bool(state and state.ready and not self._ingest_failed)
+        sync_failing = self._consecutive_sync_failures >= DASHBOARD_METRICS_SYNC_FAILURE_LIMIT
+        ready = bool(state and state.ready and not self._ingest_failed and not sync_failing)
         last_ingested_at = state.last_event_at if state is not None else None
         last_ingested_dt = _parse_log_time(last_ingested_at)
         freshness_ms = (
@@ -581,11 +586,12 @@ class DashboardMetricsService:
             if last_ingested_dt is not None
             else None
         )
-        failure_reason = (
-            self._stale_reason
-            if self._ingest_failed
-            else (state.failure_reason if state is not None else "uninitialized")
-        )
+        if self._ingest_failed:
+            failure_reason = self._stale_reason
+        elif sync_failing:
+            failure_reason = "sync_failing"
+        else:
+            failure_reason = state.failure_reason if state is not None else "uninitialized"
         return {
             "status": "ready" if ready else "degraded",
             "ready": ready,

@@ -7,6 +7,8 @@
     loading-title="正在加载日志详情"
     loading-description="正在读取完整日志数据..."
     error-title="日志详情加载失败"
+    minimizable
+    :detail-key="log?.id"
     @close="emit('close')"
   >
     <template v-if="log">

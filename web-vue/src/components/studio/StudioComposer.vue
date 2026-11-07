@@ -342,6 +342,7 @@ const settingsAnchorRef = ref<HTMLElement | null>(null)
 const isDragging = ref(false)
 const settingsOpen = ref(false)
 let textareaResizeFrame = 0
+let composerHeightFrame = 0
 let composerResizeObserver: ResizeObserver | null = null
 
 const modeOptions: Array<{ label: string; value: StudioComposeMode }> = [
@@ -574,8 +575,19 @@ function scheduleTextareaResize() {
 function syncComposerHeight() {
   const shell = composerShellRef.value
   const parent = shell?.parentElement
-  if (!shell || !parent) return
+  // KeepAlive detaches the deactivated page; its zero height must not replace the real one.
+  if (!shell || !parent || !shell.isConnected) return
   parent.style.setProperty('--studio-composer-height', `${Math.ceil(shell.offsetHeight)}px`)
+}
+
+// The height feeds the message list layout, so writing it inside the observer callback
+// would resize already-observed elements in the same frame.
+function scheduleComposerHeightSync() {
+  if (composerHeightFrame) return
+  composerHeightFrame = window.requestAnimationFrame(() => {
+    composerHeightFrame = 0
+    syncComposerHeight()
+  })
 }
 
 function selectRatio(ratio: string) {
@@ -664,7 +676,7 @@ onMounted(() => {
   scheduleTextareaResize()
   syncComposerHeight()
   if (typeof ResizeObserver !== 'undefined' && composerShellRef.value) {
-    composerResizeObserver = new ResizeObserver(syncComposerHeight)
+    composerResizeObserver = new ResizeObserver(scheduleComposerHeightSync)
     composerResizeObserver.observe(composerShellRef.value)
   }
 })
@@ -683,6 +695,7 @@ watch(
 onBeforeUnmount(() => {
   if (typeof window === 'undefined') return
   if (textareaResizeFrame) window.cancelAnimationFrame(textareaResizeFrame)
+  if (composerHeightFrame) window.cancelAnimationFrame(composerHeightFrame)
   composerResizeObserver?.disconnect()
   composerResizeObserver = null
   composerShellRef.value?.parentElement?.style.removeProperty('--studio-composer-height')

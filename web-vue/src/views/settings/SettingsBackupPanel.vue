@@ -20,6 +20,13 @@
         </div>
       </div>
 
+      <p
+        v-if="backup.encryption_notice"
+        class="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+      >
+        {{ backup.encryption_notice }}
+      </p>
+
       <div class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
         <FormField label="Cloudflare Account ID">
           <Input
@@ -149,17 +156,28 @@
         >
           <div class="min-w-0">
             <p class="truncate font-medium text-foreground">{{ item.name || item.key }}</p>
-            <p class="mt-1 text-muted-foreground">{{ formatBytes(item.size_bytes ?? item.size ?? 0) }} · {{ item.last_modified || '-' }}</p>
+            <p class="mt-1 text-muted-foreground">{{ formatBytes(item.size ?? 0) }} · {{ formatDateTime(item.updated_at) }}</p>
           </div>
-          <Button
-            size="xs"
-            variant="outline"
-            root-class="text-rose-600"
-            :disabled="backupBusy === item.key"
-            @click="$emit('deleteItem', item)"
-          >
-            删除
-          </Button>
+          <div class="flex items-center gap-2">
+            <Button
+              v-if="item.encrypted"
+              size="xs"
+              variant="outline"
+              :disabled="backupBusy === item.key"
+              @click="$emit('verifyItem', item)"
+            >
+              校验
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
+              root-class="text-rose-600"
+              :disabled="backupBusy === item.key"
+              @click="$emit('deleteItem', item)"
+            >
+              删除
+            </Button>
+          </div>
         </div>
       </div>
     </FormSection>
@@ -199,6 +217,7 @@ defineEmits<{
   runNow: []
   loadBackups: []
   deleteItem: [item: BackupItem]
+  verifyItem: [item: BackupItem]
 }>()
 
 const visibleBackupItems = computed(() => props.backupItems.slice(0, 5))

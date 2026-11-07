@@ -242,6 +242,39 @@ def image_failure(
 IMAGE_TIMEOUT_PUBLIC_MESSAGE = "Image generation timed out. Please try again."
 IMAGE_TOOL_ERROR_PUBLIC_MESSAGE = "The image generation tool encountered an error. Please try again."
 IMAGE_QUOTA_PUBLIC_MESSAGE = "No image generation quota is currently available."
+_GENERIC_PUBLIC_MESSAGES = frozenset({
+    IMAGE_TIMEOUT_PUBLIC_MESSAGE,
+    IMAGE_TOOL_ERROR_PUBLIC_MESSAGE,
+    IMAGE_QUOTA_PUBLIC_MESSAGE,
+})
+
+IMAGE_FAILURE_LABELS = {
+    "upstream_error": "上游请求失败",
+    "conversation_not_ready": "上游会话尚未就绪",
+    "internal_error": "内部处理异常",
+    "upstream_unavailable": "上游服务暂不可用",
+    "upstream_connection_failed": "无法连接上游",
+    "upstream_connection_timeout": "上游连接超时",
+    "upstream_rate_limited": "上游服务限流",
+    "image_poll_timeout": "等待图片结果超时",
+    "image_stream_timeout": "上游图片流超时",
+    "image_stream_interrupted": "上游图片流中断",
+    "image_tool_error": "图片工具异常",
+    "image_quota_exhausted": "图片额度已用尽",
+    "file_upload_throttled": "参考图上传受限",
+    "auth_invalid": "账号登录态失效",
+    "content_policy_violation": "内容安全策略拒绝",
+    "invalid_image_input": "图片输入无效",
+    "upstream_text_reply": "上游仅返回文本",
+    "no_image_generated": "未生成图片",
+    "unsupported_model": "模型不支持生图",
+    "image_download_failed": "图片下载失败",
+    "image_storage_failed": "图片结果保存失败",
+    "task_interrupted": "图片任务被中断",
+    "no_available_account": "暂无可用账号",
+    "insufficient_quota": "图片额度不足",
+    "client_disconnected": "客户端已断开",
+}
 
 _PUBLIC_RAW_DETAIL_CODES = frozenset({
     "content_policy_violation",
@@ -348,6 +381,15 @@ def public_image_error_message(
     if failure.code in {"image_quota_exhausted", "insufficient_quota"}:
         return IMAGE_QUOTA_PUBLIC_MESSAGE
     return IMAGE_TOOL_ERROR_PUBLIC_MESSAGE
+
+
+def display_image_error(error_code: Any, public_error: Any) -> str:
+    """Show console users the Chinese failure label instead of a generic English fallback."""
+    text = str(public_error or "").strip()
+    if text and text not in _GENERIC_PUBLIC_MESSAGES:
+        return text
+    code = str(error_code or "").strip().lower()
+    return IMAGE_FAILURE_LABELS.get(FAILURE_CODE_ALIASES.get(code, code), "") or text
 
 
 class ImageFailureError(RuntimeError):

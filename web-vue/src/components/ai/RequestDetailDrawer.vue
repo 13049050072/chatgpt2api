@@ -72,12 +72,14 @@ const props = withDefaults(defineProps<{
   zIndex?: number
   detached?: boolean
   minimizable?: boolean
+  detailKey?: string
 }>(), {
   maxWidth: '54rem',
   rootClass: '',
   zIndex: 130,
   detached: false,
   minimizable: false,
+  detailKey: '',
 })
 
 const minimized = ref(false)
@@ -90,6 +92,13 @@ watch(
   () => props.open,
   (open) => {
     if (!open) minimized.value = false
+  },
+)
+
+watch(
+  () => props.detailKey,
+  (key, previousKey) => {
+    if (key && key !== previousKey) minimized.value = false
   },
 )
 </script>

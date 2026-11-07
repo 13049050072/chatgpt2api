@@ -148,6 +148,7 @@ def _normalize_backup_settings(value: object) -> dict[str, object]:
     normalized = copy.deepcopy(source)
     normalized.pop("has_secret_access_key", None)
     normalized.pop("has_passphrase", None)
+    normalized.pop("encryption_notice", None)
     normalized.update({
         "enabled": _normalize_bool(source.get("enabled"), False),
         "provider": "cloudflare_r2",

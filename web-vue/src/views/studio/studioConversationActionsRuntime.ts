@@ -39,6 +39,11 @@ export function useStudioConversationActionsRuntime(input: StudioConversationAct
     input.selectionRuntime.cancel()
     input.hooks.cancelMessageEdit(false)
     const seedText = typeof seed === 'string' ? seed : ''
+    const active = input.activeConversation.value
+    if (!seedText && active && active.messages.length === 0) {
+      input.hooks.scheduleScrollToBottom()
+      return active
+    }
     const now = new Date().toISOString()
     const conversation: StudioConversation = {
       id: createStudioId('studio'),

@@ -131,7 +131,7 @@ export function useStudioImageTaskRuntime(input: StudioImageTaskRuntimeInput) {
         if (previousStatus !== 'done') input.hooks.markConversationNotice(conversation.id, 'done')
       } else {
         message.status = 'error'
-        message.error = task.public_error
+        message.error = task.display_error
         if (previousStatus !== 'error') input.hooks.markConversationNotice(conversation.id, 'error')
       }
       if (message.status !== previousStatus) changedConversations.add(conversation)

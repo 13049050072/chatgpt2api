@@ -71,9 +71,15 @@ export interface BackupItem {
   key: string
   name?: string
   size?: number
-  size_bytes?: number
-  last_modified?: string
+  updated_at?: string
   encrypted?: boolean
+}
+
+export interface BackupVerifyResult {
+  key: string
+  status: 'valid' | 'mismatch' | 'missing_hmac' | 'unencrypted'
+  ok: boolean
+  message: string
 }
 
 export interface BackupRunResult {
@@ -175,6 +181,9 @@ export const settingsApi = {
 
   deleteBackup: (key: string) =>
     apiClient.post<{ key: string }, { ok: boolean }>('/api/backups/delete', { key }),
+
+  verifyBackup: (key: string) =>
+    apiClient.post<{ key: string }, { result: BackupVerifyResult }>('/api/backups/verify', { key }),
 
   testImageStorage: () =>
     apiClient.post<Record<string, never>, { result: ImageStorageTestResult }>('/api/image-storage/test', {}),

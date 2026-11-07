@@ -115,6 +115,7 @@ class BackupSettings(_BackupFields):
     provider: Literal["cloudflare_r2"] = "cloudflare_r2"
     has_secret_access_key: bool = False
     has_passphrase: bool = False
+    encryption_notice: str = ""
 
 
 class BackupPatch(_BackupFields):

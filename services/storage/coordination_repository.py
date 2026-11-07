@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterator
 
 from sqlalchemy import Column, DateTime, Float, Integer, JSON, String, select, text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from services.application_database import (
@@ -17,6 +18,9 @@ from services.application_database import (
     initialize_application_database,
     resolve_database_url,
 )
+
+# Lets zero-timeout lease probes ride out ordinary write transactions.
+_SQLITE_LEASE_MIN_BUSY_MS = 1000
 
 
 class BackupExecutionStateModel(DatabaseBase):
@@ -195,7 +199,7 @@ class _DatabaseLease:
             connection.close()
 
     def _acquire_sqlite(self, deadline: float | None) -> None:
-        while not self._try_acquire_sqlite():
+        while not self._try_acquire_sqlite(deadline):
             if self._timed_out(deadline):
                 raise TimeoutError(f"coordination lease is busy: {self._name}")
             time.sleep(0.05)
@@ -206,12 +210,23 @@ class _DatabaseLease:
         )
         self._heartbeat_thread.start()
 
-    def _try_acquire_sqlite(self) -> bool:
+    def _try_acquire_sqlite(self, deadline: float | None = None) -> bool:
         now_epoch = time.time()
         now = datetime.now(timezone.utc)
         connection = self._repository.engine.connect()
         try:
-            connection.execute(text("BEGIN IMMEDIATE"))
+            if deadline is not None:
+                # SQLite engines use NullPool, so this busy timeout dies with the connection.
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                busy_ms = max(_SQLITE_LEASE_MIN_BUSY_MS, remaining_ms)
+                connection.exec_driver_sql(f"PRAGMA busy_timeout = {busy_ms}")
+            try:
+                connection.execute(text("BEGIN IMMEDIATE"))
+            except OperationalError as exc:
+                if deadline is None or "locked" not in str(exc.orig).lower():
+                    raise
+                connection.rollback()
+                return False
             row = connection.execute(
                 select(ApplicationCoordinationLeaseModel).where(
                     ApplicationCoordinationLeaseModel.name == self._name
