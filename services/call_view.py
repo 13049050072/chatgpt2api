@@ -5,6 +5,7 @@ from typing import Any, Iterable, Mapping
 from services.image_failure import (
     IMAGE_FAILURE_LABELS,
     IMAGE_TOOL_ERROR_PUBLIC_MESSAGE,
+    display_image_error,
     is_rate_limit_failure_code,
     is_structured_failure,
     is_text_review_failure_code,
@@ -528,7 +529,6 @@ def _result_text(summary: Mapping[str, Any]) -> str:
     requested = _int(summary.get("image_requested_count"))
     succeeded = _int(summary.get("image_succeeded_count"))
     public_error = _clean(summary.get("public_error"))
-    error_label = _image_failure_label(summary.get("error_code"))
     summary_text = _clean(summary.get("summary"))
 
     if outcome == "partial_success":
@@ -536,7 +536,7 @@ def _result_text(summary: Mapping[str, Any]) -> str:
     if outcome == "text_review":
         return "上游返回文本"
     if outcome in {"failed", "rate_limited"}:
-        return public_error or error_label or summary_text or "调用失败"
+        return display_image_error(summary.get("error_code"), public_error) or summary_text or "调用失败"
     if succeeded > 0:
         return (
             f"生成 {succeeded}/{requested} 张图片"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from services.image_failure import display_image_error
 from services.request_detail_view import request_proxy_source_label, request_status_presentation
 
 
@@ -553,7 +554,10 @@ def _project_event(value: object) -> dict[str, Any]:
         for part in (
             "已切换账号" if bool(event.get("switched_account")) else "",
             account_text,
-            _text(event.get("public_error")) or _text(event.get("error")),
+            display_image_error(
+                event.get("failure_code"),
+                _text(event.get("public_error")) or _text(event.get("error")),
+            ),
         )
         if part
     )
@@ -589,7 +593,10 @@ def _project_record(value: object, *, include_detail: bool = False) -> dict[str,
         "status_label": status_label,
         "status_tone": status_tone,
         "stage_text": stage_text,
-        "error_text": _text(record.get("public_error")) or _text(record.get("error")),
+        "error_text": display_image_error(
+            record.get("failure_code"),
+            _text(record.get("public_error")) or _text(record.get("error")),
+        ),
         "duration_text": _format_ms(_row_duration(record)),
         "metric_digest": _metric_digest(record, timings),
         "egress_text": egress["display"],
