@@ -672,13 +672,15 @@ def _message_image_url(value: object) -> str:
     return str(value or "").strip()
 
 
-def _decode_message_image_url(value: object) -> tuple[bytes, str] | None:
+def _decode_message_image_url(value: object, cache_scope: str = "") -> tuple[bytes, str] | None:
     source = _message_image_url(value)
     if not source.startswith(("data:", "http://", "https://")):
         return None
     remote = not source.startswith("data:")
+    # Scoped per caller: one key's download must not answer another key's request.
+    cache_key = (cache_scope, source)
     if remote:
-        cached = _downloaded_message_images.get(source)
+        cached = _downloaded_message_images.get(cache_key)
         if cached is not None:
             return cached
     # Public-host and redirect checks match image edits. Chat keeps the 10MB cap
@@ -691,16 +693,16 @@ def _decode_message_image_url(value: object) -> tuple[bytes, str] | None:
         use_egress_proxy=True,
     )
     if remote:
-        _downloaded_message_images.put(source, (image_data, mime_type))
+        _downloaded_message_images.put(cache_key, (image_data, mime_type))
     return image_data, mime_type
 
 
-def _decode_message_image_object(item: dict[str, object]) -> tuple[bytes, str] | None:
+def _decode_message_image_object(item: dict[str, object], cache_scope: str = "") -> tuple[bytes, str] | None:
     data = item.get("data")
     if isinstance(data, (bytes, bytearray)):
         return bytes(data), str(item.get("mime") or item.get("mime_type") or "image/png")
     for key in ("image_url", "url"):
-        image = _decode_message_image_url(item.get(key))
+        image = _decode_message_image_url(item.get(key), cache_scope)
         if image:
             return image
     value = item.get("b64_json") or item.get("base64")
@@ -733,7 +735,12 @@ def count_message_image_parts(content: object) -> int:
     )
 
 
-def extract_image_from_message_content(content: object, limit: int | None = None) -> list[tuple[bytes, str]]:
+def extract_image_from_message_content(
+    content: object,
+    limit: int | None = None,
+    *,
+    image_cache_scope: str = "",
+) -> list[tuple[bytes, str]]:
     if not isinstance(content, list):
         return []
     images = []
@@ -744,11 +751,11 @@ def extract_image_from_message_content(content: object, limit: int | None = None
             continue
         item_type = str(item.get("type") or "").strip()
         if item_type == "image_url":
-            image = _decode_message_image_url(item.get("image_url") or item.get("url") or item)
+            image = _decode_message_image_url(item.get("image_url") or item.get("url") or item, image_cache_scope)
             if image:
                 images.append(image)
         elif item_type in {"input_image", "image"}:
-            image = _decode_message_image_object(item)
+            image = _decode_message_image_object(item, image_cache_scope)
             if image:
                 images.append(image)
     return images
@@ -758,12 +765,13 @@ def extract_chat_image(body: dict[str, object]) -> list[tuple[bytes, str]]:
     messages = body.get("messages")
     if not isinstance(messages, list):
         return []
+    image_cache_scope = str(body.get("_caller_key_id") or "")
     for message in reversed(messages):
         if not isinstance(message, dict):
             continue
         if str(message.get("role") or "").strip().lower() != "user":
             continue
-        images = extract_image_from_message_content(message.get("content"))
+        images = extract_image_from_message_content(message.get("content"), image_cache_scope=image_cache_scope)
         if images:
             return images
     return []

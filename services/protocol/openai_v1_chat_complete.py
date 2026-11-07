@@ -211,7 +211,10 @@ def _reject_multiple_text_choices(body: dict[str, Any]) -> None:
 def text_chat_parts(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     _reject_multiple_text_choices(body)
     model = str(body.get("model") or "auto").strip() or "auto"
-    messages = normalize_text_messages(normalize_messages(chat_messages_from_body(body)))
+    messages = normalize_text_messages(normalize_messages(
+        chat_messages_from_body(body),
+        image_cache_scope=str(body.get("_caller_key_id") or ""),
+    ))
     if has_unsupported_tools(body, WEB_SEARCH_TOOL_TYPES):
         messages.insert(0, {"role": "system", "content": TOOL_UNAVAILABLE_SYSTEM_MESSAGE})
     return model, messages

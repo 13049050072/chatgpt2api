@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import math
 import threading
 import time
@@ -17,6 +18,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from services.runtime_configuration import env_int
+from utils.log import logger
 
 # Slows every wrong key; FailedAuthLockout stops sustained guessing from one address.
 FAILED_AUTH_DELAY_SECONDS = 0.5
@@ -105,6 +107,34 @@ def record_failed_key(request: Request) -> None:
         failed_auth_lockout.record_failure(address)
 
 
+_UNTRUSTED_PROXY_WARNING_LIMIT = 16
+_untrusted_proxy_warnings: set[str] = set()
+
+
+def _warn_untrusted_forwarding(address: str, headers: Headers) -> None:
+    """Warn once per local proxy whose X-Forwarded-For was not applied to the client address."""
+    forwarded = str(headers.get("x-forwarded-for") or "")
+    if not forwarded or not address or address in _untrusted_proxy_warnings:
+        return
+    if len(_untrusted_proxy_warnings) >= _UNTRUSTED_PROXY_WARNING_LIMIT:
+        return
+    if address in {part.strip() for part in forwarded.split(",")}:
+        return
+    try:
+        connecting = ipaddress.ip_address(address)
+    except ValueError:
+        return
+    # Public senders of the header are as likely to be clients spoofing it as proxies.
+    if not (connecting.is_private or connecting.is_loopback):
+        return
+    _untrusted_proxy_warnings.add(address)
+    logger.warning({
+        "event": "forwarded_headers_untrusted",
+        "address": address,
+        "hint": "若这是反向代理的地址，请把它加入 FORWARDED_ALLOW_IPS；否则密钥错误锁定会把经该代理的所有请求算作同一来源",
+    })
+
+
 class FailedAuthLockoutMiddleware:
     """Answers 429 to requests that carry a key from a locked-out address, without checking the key."""
 
@@ -117,7 +147,10 @@ class FailedAuthLockoutMiddleware:
             return
         client = scope.get("client")
         address = client[0] if client else ""
-        retry_after = failed_auth_lockout.retry_after(address) if _presents_key(Headers(scope=scope)) else 0
+        headers = Headers(scope=scope)
+        if failed_auth_lockout.enabled:
+            _warn_untrusted_forwarding(address, headers)
+        retry_after = failed_auth_lockout.retry_after(address) if _presents_key(headers) else 0
         if not retry_after:
             await self.app(scope, receive, send)
             return

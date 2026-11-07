@@ -1407,41 +1407,43 @@ def create_router() -> APIRouter:
         tokens = _unique_tokens([*body.tokens, *payload_tokens])
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
+        track_outcomes = not body.restore
+        token_outcomes: list[tuple[str, str]] = []
+
+        def add_plain_tokens(plain_tokens: list[str]) -> dict:
+            if target_group_id is None:
+                plain_result = account_service.add_accounts(
+                    plain_tokens,
+                    return_items=False,
+                    return_item_results=track_outcomes,
+                )
+            else:
+                plain_result = account_service.add_account_items(
+                    [{"access_token": token, "group_id": target_group_id} for token in plain_tokens],
+                    return_items=False,
+                    return_item_results=track_outcomes,
+                )
+            token_outcomes.extend(zip(plain_tokens, plain_result.get("item_results") or []))
+            return plain_result
+
         try:
             if account_payloads:
                 result = account_service.add_account_items(
                     account_payloads,
                     return_items=False,
                     restore=body.restore,
-                    return_item_results=not body.restore,
+                    return_item_results=track_outcomes,
                 )
+                token_outcomes.extend(zip(payload_tokens, result.get("item_results") or []))
                 payload_token_set = set(_unique_tokens(payload_tokens))
                 extra_tokens = [token for token in tokens if token not in payload_token_set]
                 if extra_tokens:
-                    if target_group_id is None:
-                        extra_result = account_service.add_accounts(
-                            extra_tokens,
-                            return_items=False,
-                        )
-                    else:
-                        extra_result = account_service.add_account_items(
-                            [{"access_token": token, "group_id": target_group_id} for token in extra_tokens],
-                            return_items=False,
-                        )
+                    extra_result = add_plain_tokens(extra_tokens)
                     result["added"] = int(result.get("added") or 0) + int(extra_result.get("added") or 0)
                     result["updated"] = int(result.get("updated") or 0) + int(extra_result.get("updated") or 0)
                     result["skipped"] = int(result.get("skipped") or 0) + int(extra_result.get("skipped") or 0)
             else:
-                if target_group_id is None:
-                    result = account_service.add_accounts(
-                        tokens,
-                        return_items=False,
-                    )
-                else:
-                    result = account_service.add_account_items(
-                        [{"access_token": token, "group_id": target_group_id} for token in tokens],
-                        return_items=False,
-                    )
+                result = add_plain_tokens(tokens)
         except ValueError as exc:
             raise HTTPException(
                 status_code=400,
@@ -1453,7 +1455,7 @@ def create_router() -> APIRouter:
             if token:
                 source_by_token[token] = _clean_text(item.get("source_type")) or "web"
         outcome_by_token: dict[str, str] = {}
-        for token, outcome in zip(payload_tokens, result.get("item_results") or []):
+        for token, outcome in token_outcomes:
             if token:
                 _record_import_outcome(outcome_by_token, token, outcome)
         outcome_by_account: dict[str, str] = {}

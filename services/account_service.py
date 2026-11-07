@@ -2937,14 +2937,24 @@ class AccountService:
         return result
 
     @account_processing_batch
-    def add_accounts(self, tokens: list[str], source_type: str = "web", return_items: bool = True) -> dict:
+    def add_accounts(
+        self,
+        tokens: list[str],
+        source_type: str = "web",
+        return_items: bool = True,
+        *,
+        return_item_results: bool = False,
+    ) -> dict:
         tokens = list(dict.fromkeys(token for token in tokens if token))
         if not tokens:
-            return {"added": 0, "updated": 0, "skipped": 0, "items": self.list_accounts() if return_items else []}
+            result = {"added": 0, "updated": 0, "skipped": 0, "items": self.list_accounts() if return_items else []}
+            if return_item_results:
+                result["item_results"] = []
+            return result
         return self._add_account_payloads([
             {"access_token": token, "source_type": self._normalize_source_type(source_type)}
             for token in tokens
-        ], return_items=return_items)
+        ], return_items=return_items, return_item_results=return_item_results)
 
     def _add_account_payloads(
         self,

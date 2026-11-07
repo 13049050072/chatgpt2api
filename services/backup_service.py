@@ -563,6 +563,8 @@ class BackupService:
         candidate = _clean(key)
         if not candidate:
             raise BackupError("备份对象 key 不能为空")
+        if not _is_backup_object(candidate):
+            raise BackupError("备份对象 key 无效")
         client = CloudflareR2Client(config.get_backup_settings())
         try:
             client.delete_object(candidate)

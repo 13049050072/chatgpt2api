@@ -74,6 +74,8 @@ curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/deploy/ins
 
 服务部署在 Nginx、Caddy 等反向代理之后时，必须设置 `FORWARDED_ALLOW_IPS`。否则服务看到的来源地址都是代理地址，一个人反复输错密钥会把所有人一起锁定。把它设为代理连到服务时使用的地址，多个地址用逗号分隔；宿主机上的代理转发到 Docker 容器时，这个地址通常是 Docker 网络的网关地址（例如 `172.18.0.1`，以容器看到的来源地址为准）。只有服务端口不对外开放时才能设为 `*`，否则客户端可以伪造 `X-Forwarded-For` 绕过锁定。源码运行时，在启动 uvicorn 的环境中设置同名环境变量。
 
+如果内网或本机地址发来的请求带有 `X-Forwarded-For`，但服务没有信任这个地址，日志会记录一次 `forwarded_headers_untrusted` 警告并给出该地址。确认它是你的反向代理后，再把它加入 `FORWARDED_ALLOW_IPS`。
+
 ## 本地开发
 
 后端：

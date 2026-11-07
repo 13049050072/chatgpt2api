@@ -494,7 +494,12 @@ def _conversation_image_budgets(messages: list[Any]) -> tuple[dict[int, int], in
     return budgets, (user_positions[-1] if user_positions else -1)
 
 
-def normalize_messages(messages: object, system: Any = None) -> list[dict[str, Any]]:
+def normalize_messages(
+    messages: object,
+    system: Any = None,
+    *,
+    image_cache_scope: str = "",
+) -> list[dict[str, Any]]:
     normalized = []
     if config.global_system_prompt:
         normalized.append({"role": "system", "content": config.global_system_prompt})
@@ -520,7 +525,11 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
             images: list[tuple[bytes, str]] = []
             if role == "user" and image_budgets.get(position, 0) > 0:
                 try:
-                    images.extend(extract_image_from_message_content(content, limit=image_budgets[position]))
+                    images.extend(extract_image_from_message_content(
+                        content,
+                        limit=image_budgets[position],
+                        image_cache_scope=image_cache_scope,
+                    ))
                 except HTTPException as exc:
                     if position == latest_user_position:
                         raise
@@ -1255,6 +1264,7 @@ def iter_conversation_payloads(
     text_message_id = ""
     repeated_message_text = ""
     message_separator = ""
+    rewrite_logged = False
     for payload in payloads:
         # print(f"[upstream_sse] {payload}", flush=True)
         if not payload:
@@ -1332,6 +1342,18 @@ def iter_conversation_payloads(
             repeated_message_text = ""
         # Deltas only ever append to what was already sent; a rewritten or
         # shorter snapshot must not resend or duplicate delivered text.
+        if (
+            not rewrite_logged
+            and state.text
+            and not next_text.startswith(state.text)
+            and not state.text.startswith(next_text)
+        ):
+            rewrite_logged = True
+            logger.warning({
+                "event": "stream_text_rewritten",
+                "sent_chars": len(state.text),
+                "snapshot_chars": len(next_text),
+            })
         if len(next_text) > len(state.text):
             delta = next_text[len(state.text):]
             state.text = next_text

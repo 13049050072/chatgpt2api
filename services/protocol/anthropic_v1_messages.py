@@ -112,7 +112,11 @@ def message_request(body: dict[str, Any]) -> MessageRequest:
     model = str(payload.get("model") or "auto").strip() or "auto"
     return MessageRequest(
         backend=text_backend(),
-        messages=normalize_messages(payload.get("messages"), payload.get("system")),
+        messages=normalize_messages(
+            payload.get("messages"),
+            payload.get("system"),
+            image_cache_scope=str(payload.get("_caller_key_id") or ""),
+        ),
         model=model,
         tools=payload.get("tools"),
     )

@@ -55,6 +55,8 @@ STORED_RESPONSE_TTL_SECONDS = 60 * 60
 STORED_RESPONSE_LIMIT = 256
 STORED_RESPONSE_MAX_CHARS = 4 * 1024 * 1024
 STORED_RESPONSE_TOTAL_CHARS = 64 * 1024 * 1024
+STORED_RESPONSE_OWNER_LIMIT = 64
+STORED_RESPONSE_OWNER_CHARS = 16 * 1024 * 1024
 
 
 class _StoredResponses:
@@ -64,11 +66,22 @@ class _StoredResponses:
         self._lock = threading.Lock()
         self._items: OrderedDict[str, tuple[float, str, list[dict[str, Any]], int]] = OrderedDict()
         self._total_chars = 0
+        self._owner_items: dict[str, OrderedDict[str, None]] = {}
+        self._owner_chars: dict[str, int] = {}
 
     def _pop_locked(self, response_id: str) -> None:
         item = self._items.pop(response_id, None)
-        if item is not None:
-            self._total_chars -= item[3]
+        if item is None:
+            return
+        _expires_at, owner, _messages, size = item
+        self._total_chars -= size
+        owned = self._owner_items.get(owner)
+        if owned is not None:
+            owned.pop(response_id, None)
+            self._owner_chars[owner] = self._owner_chars.get(owner, 0) - size
+            if not owned:
+                del self._owner_items[owner]
+                self._owner_chars.pop(owner, None)
 
     def put(self, response_id: str, owner: str, messages: list[dict[str, Any]]) -> None:
         try:
@@ -82,6 +95,16 @@ class _StoredResponses:
             self._pop_locked(response_id)
             self._items[response_id] = (expires_at, owner, messages, size)
             self._total_chars += size
+            owned = self._owner_items.setdefault(owner, OrderedDict())
+            owned[response_id] = None
+            self._owner_chars[owner] = self._owner_chars.get(owner, 0) + size
+            # Each caller is trimmed to its own share first, so a single key cannot
+            # push other callers' history out of the shared store.
+            while owned and (
+                len(owned) > STORED_RESPONSE_OWNER_LIMIT
+                or self._owner_chars.get(owner, 0) > STORED_RESPONSE_OWNER_CHARS
+            ):
+                self._pop_locked(next(iter(owned)))
             while self._items and (
                 len(self._items) > STORED_RESPONSE_LIMIT
                 or self._total_chars > STORED_RESPONSE_TOTAL_CHARS
@@ -151,22 +174,22 @@ def response_image_tool(body: dict[str, Any]) -> dict[str, object]:
     return {}
 
 
-def extract_response_image(input_value: object) -> tuple[bytes, str] | None:
+def extract_response_image(input_value: object, *, image_cache_scope: str = "") -> tuple[bytes, str] | None:
     if isinstance(input_value, dict):
         if str(input_value.get("type") or "").strip() == "input_image":
-            images = extract_image_from_message_content([input_value])
+            images = extract_image_from_message_content([input_value], image_cache_scope=image_cache_scope)
             return images[0] if images else None
-        images = extract_image_from_message_content(input_value.get("content"))
+        images = extract_image_from_message_content(input_value.get("content"), image_cache_scope=image_cache_scope)
         return images[0] if images else None
     if not isinstance(input_value, list):
         return None
     for item in reversed(input_value):
         if isinstance(item, dict):
             if str(item.get("type") or "").strip() == "input_image":
-                images = extract_image_from_message_content([item])
+                images = extract_image_from_message_content([item], image_cache_scope=image_cache_scope)
                 if images:
                     return images[0]
-            images = extract_image_from_message_content(item.get("content"))
+            images = extract_image_from_message_content(item.get("content"), image_cache_scope=image_cache_scope)
             if images:
                 return images[0]
     return None
@@ -388,7 +411,7 @@ def text_response_parts(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]]
     # Instructions are not carried into later turns; each request supplies its own.
     body["_conversation_messages"] = [*history, *current]
     conversation = [*messages_from_input(None, body.get("instructions")), *history, *current]
-    messages = normalize_text_messages(normalize_messages(conversation))
+    messages = normalize_text_messages(normalize_messages(conversation, image_cache_scope=_response_owner(body)))
     if has_unsupported_response_tools(body):
         messages.insert(0, {"role": "system", "content": TOOL_UNAVAILABLE_SYSTEM_MESSAGE})
     return model, messages
@@ -570,7 +593,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     if not prompt:
         raise HTTPException(status_code=400, detail={"error": "input text is required"})
     model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
-    image_info = extract_response_image(body.get("input"))
+    image_info = extract_response_image(body.get("input"), image_cache_scope=_response_owner(body))
     if image_info:
         image_data, mime_type = image_info
         images = encode_images([(image_data, "image.png", mime_type)])

@@ -55,6 +55,7 @@ export type StudioImageEditRequest = {
 
 const REQUEST_FILE_CACHE_LIMIT = 12
 const MISSING_SOURCE_IMAGES_MESSAGE = '原图没有保存在本地，请重新上传原图或重新进行局部修改后再提交'
+const INPAINT_PANEL_ONLY_MESSAGE = '局部修改请在图片上重新打开局部修改面板提交'
 // Exact files of recent image requests; persisted history may only keep previews.
 const requestFilesByMessageId = new Map<string, File[]>()
 
@@ -165,7 +166,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     const files = referenceRuntime.selectedFiles()
     if (mode === 'image' && message.requestPrompt && !files.length) {
       // The inpainting prompt and marked image only exist in the inpaint panel.
-      toast.error('局部修改请在图片上重新打开局部修改面板提交')
+      toast.error(INPAINT_PANEL_ONLY_MESSAGE)
       return
     }
     const attachments = referenceRuntime.attachmentNames()
@@ -251,10 +252,14 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       toast.error('请重新上传原图后提交文件任务')
     }
     if (expectedRequestFileCount(target.message)) {
-      // Inpainting prompts are built outside the composer and cannot be edited here.
-      const files = target.message.requestPrompt ? null : await recoverRequestFiles(target.message)
-      if (files?.length) await referenceRuntime.append(files)
-      else toast.error(MISSING_SOURCE_IMAGES_MESSAGE)
+      if (target.message.requestPrompt) {
+        // Inpainting prompts are built outside the composer and cannot be edited here.
+        toast.error(INPAINT_PANEL_ONLY_MESSAGE)
+      } else {
+        const files = await recoverRequestFiles(target.message)
+        if (files?.length) await referenceRuntime.append(files)
+        else toast.error(MISSING_SOURCE_IMAGES_MESSAGE)
+      }
     }
     hooks.scheduleScrollToBottom()
   }
