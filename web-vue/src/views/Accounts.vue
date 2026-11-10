@@ -330,6 +330,12 @@
                       spellcheck="false"
                     ></textarea>
                   </label>
+                  <p
+                    v-if="form.refresh_token && !form.id_token"
+                    class="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300 md:col-span-2"
+                  >
+                    只填 RT 不填 ID Token 时，续期会按 AT 判断使用哪个客户端，可能失败。请一并填写同一次登录签发的 ID Token。
+                  </p>
                   </div>
                 </FormSection>
 
