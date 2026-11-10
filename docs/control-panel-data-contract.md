@@ -30,6 +30,11 @@
 `AccountSelectionScope` 携带相同的 `source_type`，因此“全选匹配结果”及其预览会
 沿用当前来源条件。默认值仍为 `all`，兼容现有调用方。
 
+列表和选择范围还接受 `credential_state=all|rt_missing|rt_invalid|at_expiring|at_invalid`，
+判断依据与列表投影的 `refresh_token_status`、`access_token_status` 相同：RT 缺失、
+RT 已判定失效、AT 临期（24 小时内过期）、AT 失效（已过期或上游确认失效）。
+列表数量、分页、预览、跨页全选及筛选导出共用这一条件，默认 `all`。
+
 ## 概览中心
 
 `GET /api/dashboard` 一次返回三个所有权清晰的投影：`ranges` 是 Application Database 中 Dashboard 指标的 `24h`、`7d`、`30d` 持久化汇总，`runtime` 是当前进程与运行环境的实时采样，`operations` 是当前 Active Requests 数量。前端只校验并展示这些字段，不扫描 Call Records，也不从实时监控详情反算并发。

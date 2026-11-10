@@ -18,6 +18,7 @@ export type AccountPresentationTone = 'neutral' | 'success' | 'warning' | 'error
 export type AccountGroupProxyMode = AccountProxyMode | 'profile'
 export type AccountMemoryState = 'enabled' | 'disabled' | 'unknown'
 export type AccountMemoryFilter = 'all' | AccountMemoryState
+export type AccountCredentialFilter = 'all' | 'rt_missing' | 'rt_invalid' | 'at_expiring' | 'at_invalid'
 export type AccountMemoryClearStatus = 'never' | 'verified' | 'pending' | 'failed'
 export type AccountMemoryAction = 'enable_memory' | 'disable_memory' | 'refresh_memory' | 'clear_memory'
 
@@ -281,6 +282,7 @@ export type AccountListParams = {
   group_id?: string
   source_type?: AccountSourceFilter
   memory_state?: AccountMemoryFilter
+  credential_state?: AccountCredentialFilter
 }
 
 export type AccountSelectionScope = {
@@ -292,6 +294,7 @@ export type AccountSelectionScope = {
   group_id?: string
   source_type?: AccountSourceFilter
   memory_state?: AccountMemoryFilter
+  credential_state?: AccountCredentialFilter
 }
 
 export type AccountSelectionTarget = readonly string[] | AccountSelectionScope

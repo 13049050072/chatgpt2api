@@ -40,7 +40,13 @@ from services.account_operation_events import (
 from services.account_import_job import RemoteImportJobConflictError
 from services.account_test_service import account_test_service
 from services.account_service import AccountService, account_service
-from services.account_view import account_detail, account_memory_state, account_row, account_status_category
+from services.account_view import (
+    account_credential_state_matches,
+    account_detail,
+    account_memory_state,
+    account_row,
+    account_status_category,
+)
 from services.config import config
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.log_service import LoggedCall
@@ -67,6 +73,9 @@ def _schedule_account_operation(coroutine: Any) -> Any:
     return task
 
 
+AccountCredentialFilter = Literal["all", "rt_missing", "rt_invalid", "at_expiring", "at_invalid"]
+
+
 class AccountSelectionScope(BaseModel):
     mode: Literal["explicit", "filter", "all"] = "explicit"
     account_ids: list[str] = Field(default_factory=list)
@@ -76,6 +85,7 @@ class AccountSelectionScope(BaseModel):
     group_id: str = "all"
     source_type: Literal["all", "web", "codex"] = "all"
     memory_state: Literal["all", "enabled", "disabled", "unknown"] = "all"
+    credential_state: AccountCredentialFilter = "all"
 
 
 class AccountSelectionPreviewRequest(BaseModel):
@@ -1006,6 +1016,7 @@ def _account_matches_filters(
         group_id: str,
         source_type: str,
         memory_state: str = "all",
+        credential_state: str = "all",
 ) -> bool:
     return (
         _account_matches_keyword(account, keyword)
@@ -1013,6 +1024,7 @@ def _account_matches_filters(
         and _account_matches_group(account, group_id)
         and _account_matches_source_type(account, source_type)
         and (memory_state == "all" or account_memory_state(account) == memory_state)
+        and account_credential_state_matches(account, credential_state)
     )
 
 
@@ -1024,6 +1036,7 @@ def _filtered_accounts(
         group_id: str,
         source_type: str,
         memory_state: str = "all",
+        credential_state: str = "all",
 ) -> list[dict[str, Any]]:
     return [
         account
@@ -1035,6 +1048,7 @@ def _filtered_accounts(
             group_id=group_id,
             source_type=source_type,
             memory_state=memory_state,
+            credential_state=credential_state,
         )
     ]
 
@@ -1051,6 +1065,7 @@ def _account_selection_members(
             group_id=selection.group_id,
             source_type=selection.source_type,
             memory_state=selection.memory_state,
+            credential_state=selection.credential_state,
         )
 
     members: list[tuple[str, str]] = []
@@ -1137,6 +1152,7 @@ def _accounts_page(
         group_id: str,
         source_type: str,
         memory_state: str = "all",
+        credential_state: str = "all",
 ) -> dict[str, Any]:
     items = account_service.list_accounts()
     filtered = _filtered_accounts(
@@ -1146,6 +1162,7 @@ def _accounts_page(
         group_id=group_id,
         source_type=source_type,
         memory_state=memory_state,
+        credential_state=credential_state,
     )
     safe_page = max(1, page)
     safe_page_size = max(1, min(page_size, 500))
@@ -1260,6 +1277,7 @@ def create_router() -> APIRouter:
             group_id: str = "all",
             source_type: Literal["all", "web", "codex"] = "all",
             memory_state: Literal["all", "enabled", "disabled", "unknown"] = "all",
+            credential_state: AccountCredentialFilter = "all",
             authorization: str | None = Header(default=None),
     ):
         require_admin(authorization)
@@ -1271,6 +1289,7 @@ def create_router() -> APIRouter:
             group_id=group_id,
             source_type=source_type,
             memory_state=memory_state,
+            credential_state=credential_state,
         )
 
     @router.post("/api/accounts/selection-preview")

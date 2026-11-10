@@ -89,15 +89,17 @@ def _timestamp_seconds(value: object) -> int | None:
     return int(parsed.timestamp())
 
 
-def _credential_lifecycle(account: dict[str, Any]) -> dict[str, Any]:
-    access_token = _text(account.get("access_token"))
-    remotely_invalid = _text(account.get("last_remote_check_result")).lower() == "invalid"
-    availability = project_upstream_credential_availability(
-        access_token,
+def _credential_availability(account: dict[str, Any]):
+    return project_upstream_credential_availability(
+        _text(account.get("access_token")),
         _text(account.get("refresh_token")),
-        access_confirmed_invalid=remotely_invalid,
+        access_confirmed_invalid=_text(account.get("last_remote_check_result")).lower() == "invalid",
         refresh_confirmed_invalid=bool(account.get("refresh_token_invalid_at")),
     )
+
+
+def _credential_lifecycle(account: dict[str, Any]) -> dict[str, Any]:
+    availability = _credential_availability(account)
     access = availability.access
     refresh_status = availability.refresh_status
     access_label, access_tone = _ACCESS_TOKEN_PRESENTATION[access.status]
@@ -214,6 +216,19 @@ def account_status_category(account: dict[str, Any]) -> AccountStatusCategory:
         _backend_status_category(account),
         _credential_lifecycle(account),
     )
+
+
+def account_credential_state_matches(account: dict[str, Any], credential_state: str) -> bool:
+    """Whether an account is in the credential state a list filter asks for."""
+    if credential_state == "all":
+        return True
+    availability = _credential_availability(account)
+    return {
+        "rt_missing": availability.refresh_status == "missing",
+        "rt_invalid": availability.refresh_status == "invalid",
+        "at_expiring": availability.access.status == "expiring",
+        "at_invalid": availability.access.status == "invalid",
+    }.get(credential_state, False)
 
 
 def account_memory_state(account: dict[str, Any]) -> Literal["enabled", "disabled", "unknown"]:

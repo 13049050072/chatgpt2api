@@ -39,6 +39,13 @@
               selected-indicator="none"
               aria-label="记忆状态筛选"
             />
+            <GroupedSelectMenu
+              v-model="credentialFilter"
+              :options="credentialFilterOptions"
+              placeholder="凭据状态"
+              selected-indicator="none"
+              aria-label="凭据状态筛选"
+            />
           </FilterToolbar>
 
           <div class="accounts-toolbar-view">
@@ -858,10 +865,12 @@ const {
   groupFilter,
   sourceFilter,
   memoryFilter,
+  credentialFilter,
   statusFilterOptions,
   groupFilterOptions,
   sourceFilterOptions,
   memoryFilterOptions,
+  credentialFilterOptions,
   editingId,
   accountListTotal,
   accountAllTotal,
