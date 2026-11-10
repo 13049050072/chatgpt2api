@@ -1040,7 +1040,7 @@ class Sub2APIImportService:
         def append_payload(account_id: str, token: str, meta: dict) -> None:
             payload: dict[str, object] = {
                 "access_token": token,
-                "source_type": "codex",
+                "source_type": "auto",
             }
             email = _clean(meta.get("email")) if isinstance(meta, dict) else ""
             plan_type = _clean(meta.get("plan_type")) if isinstance(meta, dict) else ""

@@ -18,7 +18,7 @@ from services.account_operation_events import (
     normalize_account_operation_events,
     project_account_operation_presentation,
 )
-from services.account_service import account_service
+from services.account_service import AccountService, account_service
 from services.remote_import_job_status import (
     import_job_is_active,
     import_job_is_stale,
@@ -334,10 +334,11 @@ def _retained_access_token(payload: dict) -> str:
     token = _clean(payload.get("access_token"))
     if not token:
         return ""
-    account = account_service.get_account_by_token_identity(
-        token,
-        source_type=_clean(payload.get("source_type")) or "web",
-    )
+    account = None
+    for source_type in AccountService.import_lookup_sources(payload):
+        account = account_service.get_account_by_token_identity(token, source_type=source_type)
+        if account is not None:
+            break
     return _clean((account or {}).get("access_token")) or token
 
 
